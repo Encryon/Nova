@@ -10,7 +10,7 @@
 ![Statut](https://img.shields.io/badge/statut-fair--source%20/%20open-6e4bf0)
 ![Version](https://img.shields.io/badge/version-0.3.0-6e4bf0)
 ![Python](https://img.shields.io/badge/python-3.11%2B-6e4bf0)
-![Tests](https://img.shields.io/badge/tests-47%20passed-2f9e6e)
+![Tests](https://img.shields.io/badge/tests-55%20passed-2f9e6e)
 ![Licence](https://img.shields.io/badge/licence-BSL%201.1%20→%20Apache%202.0-a8630f)
 
 [🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Référence des mots-clés (6 langues)](docs/REFERENCE.md) · [Licence](#licence--license)
@@ -181,7 +181,7 @@ pour un fichier qui mélange français et anglais.
 | Filtre | `filtre` | `filter` |
 | Trier par | `trier_par` | `sort_by` / `order_by` |
 | Limite | `limite` | `limit` |
-| Types | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure` | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime` |
+| Types | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure`, `fichier`, `image`, `couleur` | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime`, `file`, `image`, `color` |
 
 Ce tableau ne couvre que FR/EN pour rester lisible ; espagnol, allemand,
 italien et portugais sont acceptés pour les mêmes mots-clés (y compris
@@ -332,6 +332,50 @@ langues. Une référence `sur` inconnue (ni entité ni requête) est
 détectée à la compilation (`nova check`/`nova compile`), pas au
 premier chargement de la page.
 
+### Composants UI riches : upload, images, couleurs, pickers natifs
+
+Trois nouveaux types de champ génèrent des composants Reflex dédiés
+plutôt qu'un simple `<input>` texte — aucune dépendance Python ou JS
+supplémentaire, uniquement des composants Reflex/HTML5 natifs :
+
+```
+entité Produit {
+  champ nom: chaine requis
+  champ photo: image
+  champ fiche: fichier
+  champ couleur: couleur
+}
+```
+
+- **`fichier`/`file`** et **`image`/`image`** : le formulaire généré
+  affiche une zone de dépôt (`rx.upload`) avec aperçu du nom de fichier
+  sélectionné ; à la soumission, le fichier est envoyé au backend via
+  `POST /uploads/` (endpoint généré automatiquement dès qu'un champ
+  `fichier`/`image` existe quelque part dans le projet), stocké sous un
+  nom unique dans le volume `backend_data` déjà utilisé par SQLite, et
+  re-servi statiquement sous `/files/<nom>`. Le champ stocke simplement
+  cette URL (`str`) — aucune colonne binaire en base.
+- **`couleur`/`color`** : un sélecteur de couleur natif
+  (`type="color"`).
+- Les types existants **`date`**, **`date_heure`**/`datetime` et
+  **`entier`**/`decimal` (`int`/`float`) obtiennent eux aussi un widget
+  natif adapté (`type="date"`, `type="datetime-local"`,
+  `type="number"`) au lieu d'un simple champ texte.
+
+Le rendu **tableau** et **carte** (`comme table` / `comme carte`) est
+également enrichi automatiquement : une **miniature cliquable** pour
+`image`, un **lien de téléchargement** pour `fichier`, une **pastille
+de couleur** pour `couleur`, et un **badge Oui/Non** coloré pour
+`booleen` — au lieu d'afficher la valeur brute.
+
+Comme pour les champs `image`/`fichier`, `docker-compose.yml` reçoit
+alors automatiquement une variable `NOVA_PUBLIC_BACKEND_URL` distincte
+de `NOVA_BACKEND_URL` : la première doit être joignable **depuis le
+navigateur de l'utilisateur** (aperçus d'image, liens de
+téléchargement), la seconde reste l'URL interne Docker utilisée pour
+les appels serveur-à-serveur — les deux diffèrent dès qu'on sort du
+`docker compose up` local.
+
 ### Aller au-delà du DSL : points d'extension "custom"
 
 Le DSL couvre le CRUD et l'UI simples. Pour tout le reste — requêtes
@@ -375,15 +419,18 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-47 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+55 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
 validité syntaxique du code généré, clés étrangères, setters de
 formulaire Reflex, validation regex, style CSS, graphiques (`chart`,
-4 types, source entité/requête), points d'extension custom — dont
-plusieurs tests qui **importent réellement** le backend et le frontend
-générés (pas seulement une vérification de syntaxe) : flux JWT complet
-(inscription, connexion, rôles, routes protégées) et route de requête
-déclarative via `TestClient`, et construction effective de l'arbre de
-composants Reflex de chaque page de graphique.
+4 types, source entité/requête), champs riches `fichier`/`image`/
+`couleur` (upload, pickers natifs, rendu tableau/carte enrichi),
+points d'extension custom — dont plusieurs tests qui **importent
+réellement** le backend et le frontend générés (pas seulement une
+vérification de syntaxe) : flux JWT complet (inscription, connexion,
+rôles, routes protégées) et route de requête déclarative via
+`TestClient`, upload de fichier réel servi par le montage statique,
+et construction effective de l'arbre de composants Reflex de chaque
+page (graphique, formulaire avec zone d'upload, carte).
 
 ### Limites connues du MVP
 
@@ -403,6 +450,13 @@ composants Reflex de chaque page de graphique.
 - `/auth/register` laisse le rôle libre par défaut — à restreindre avant
   un déploiement public (voir la section Authentification ci-dessus).
 - Le chart Helm est un squelette à adapter (registre d'images, ingress réel).
+- Les fichiers/images uploadés sont stockés sur disque côté backend (volume
+  `backend_data`) sans limite de taille/type appliquée par défaut, ni
+  redimensionnement d'image — à ajouter via `routers_custom/` avant un
+  déploiement public si nécessaire.
+- Pas de calendrier interactif, pas d'envoi d'email, pas de contenu ou de
+  texte d'interface multilingue au runtime (langue du site fixée par
+  `application { langue: ... }`) — phases prévues mais pas encore livrées.
 - Pas encore de NOVA Studio (IDE dédié), Marketplace, NOVA Cloud, NOVA AI
   — ce dépôt couvre le compilateur (Phase 1/2 de la feuille de route).
 
@@ -506,7 +560,7 @@ for a file mixing French and English.
 | Filter | `filter` | `filtre` |
 | Sort by | `sort_by` / `order_by` | `trier_par` |
 | Limit | `limit` | `limite` |
-| Types | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime` | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure` |
+| Types | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime`, `file`, `image`, `color` | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure`, `fichier`, `image`, `couleur` |
 
 This table only covers EN/FR for readability; Spanish, German, Italian
 and Portuguese are accepted for the same keywords (including the
@@ -654,6 +708,47 @@ An unknown `on`/`sur` reference (neither an entity nor a query) is
 caught at compile time (`nova check`/`nova compile`), not on the
 page's first load.
 
+### Rich UI components: upload, images, colors, native pickers
+
+Three new field types generate dedicated Reflex components instead of a
+plain text `<input>` — no extra Python or JS dependency, only native
+Reflex/HTML5 components:
+
+```
+entity Product {
+  field name: string required
+  field photo: image
+  field sheet: file
+  field color: color
+}
+```
+
+- **`file`** and **`image`**: the generated form shows a drop zone
+  (`rx.upload`) with a preview of the selected file name; on submit,
+  the file is sent to the backend via `POST /uploads/` (an endpoint
+  generated automatically as soon as any `file`/`image` field exists
+  anywhere in the project), stored under a unique name in the same
+  `backend_data` volume already used by SQLite, and served back
+  statically under `/files/<name>`. The field just stores that URL
+  (`str`) — no binary column in the database.
+- **`color`**: a native color picker (`type="color"`).
+- The existing **`date`**, **`datetime`** and **`int`**/`float` types
+  also get a matching native widget (`type="date"`,
+  `type="datetime-local"`, `type="number"`) instead of a plain text
+  field.
+
+**Table** and **card** rendering (`as table` / `as card`) is enriched
+automatically too: a **clickable thumbnail** for `image`, a
+**download link** for `file`, a **color swatch** for `color`, and a
+colored **Yes/No badge** for `bool` — instead of the raw value.
+
+Just like `image`/`file` fields, `docker-compose.yml` then
+automatically gets a `NOVA_PUBLIC_BACKEND_URL` variable distinct from
+`NOVA_BACKEND_URL`: the former must be reachable **from the user's
+browser** (image previews, download links), the latter stays the
+internal Docker URL used for server-to-server calls — the two diverge
+as soon as you go beyond a local `docker compose up`.
+
 ### Beyond the DSL: "custom" extension points
 
 The DSL covers simple CRUD and UI. For everything else — complex
@@ -697,14 +792,17 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-47 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+55 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
 generated-code syntactic validity, foreign keys, explicit Reflex form
 setters, regex validation, CSS styling, charts (`chart`, 4 types,
-entity/query source), custom extension points — including several
-tests that **actually import** the generated backend and frontend (not
-just a syntax check): a full JWT flow (register, login, roles,
-protected routes) and the declarative-query route via `TestClient`,
-plus actually building the Reflex component tree of every chart page.
+entity/query source), rich `file`/`image`/`color` fields (upload,
+native pickers, enriched table/card rendering), custom extension
+points — including several tests that **actually import** the
+generated backend and frontend (not just a syntax check): a full JWT
+flow (register, login, roles, protected routes) and the
+declarative-query route via `TestClient`, a real file upload served
+back by the static mount, and actually building the Reflex component
+tree of every page (chart, form with an upload zone, card).
 
 ### Known MVP limitations
 
@@ -726,6 +824,13 @@ plus actually building the Reflex component tree of every chart page.
   above).
 - The Helm chart is a skeleton meant to be adapted (image registry, real
   ingress).
+- Uploaded files/images are stored on disk on the backend side
+  (`backend_data` volume) with no size/type limit or image resizing
+  applied by default — add this via `routers_custom/` before a public
+  deployment if needed.
+- No interactive calendar, no email sending, no multilingual site
+  content or UI text at runtime yet (site language fixed by
+  `app { language: ... }`) — planned but not yet delivered phases.
 - Not yet included: NOVA Studio (dedicated IDE), Marketplace, NOVA
   Cloud, NOVA AI — this repo covers the compiler (roadmap Phase 1/2).
 

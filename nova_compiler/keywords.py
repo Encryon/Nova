@@ -23,6 +23,9 @@ TYPES = {
     "date": "date", "fecha": "date", "datum": "date", "data": "date",
     "datetime": "datetime", "date_heure": "datetime",
     "fecha_hora": "datetime", "datum_zeit": "datetime", "data_ora": "datetime", "data_hora": "datetime",
+    "file": "file", "fichier": "file", "archivo": "file", "datei": "file", "arquivo": "file",
+    "image": "image", "imagen": "image", "bild": "image", "immagine": "image", "imagem": "image",
+    "color": "color", "couleur": "color", "farbe": "color", "colore": "color", "cor": "color",
 }
 
 ACTIONS = {

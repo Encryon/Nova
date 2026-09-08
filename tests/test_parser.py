@@ -407,3 +407,17 @@ def test_chart_sur_unknown_source_raises_syntax_error():
     """
     with pytest.raises(NovaSyntaxError):
         parse_source(src)
+
+
+def test_rich_field_types_file_image_color_recognize_all_six_languages():
+    # file/fichier/archivo/datei/(file)/arquivo, image/imagen/bild/immagine/
+    # imagem, color/couleur/farbe/colore/cor — voir keywords.TYPES.
+    words = {
+        "file": {"en": "file", "fr": "fichier", "es": "archivo", "de": "datei", "it": "file", "pt": "arquivo"},
+        "image": {"en": "image", "fr": "image", "es": "imagen", "de": "bild", "it": "immagine", "pt": "imagem"},
+        "color": {"en": "color", "fr": "couleur", "es": "color", "de": "farbe", "it": "colore", "pt": "cor"},
+    }
+    for canonical, per_lang in words.items():
+        for lang, word in per_lang.items():
+            program = parse_source(f"entity P {{ field x: {word} }}")
+            assert program.entities[0].fields[0].type == canonical, (canonical, lang, word)

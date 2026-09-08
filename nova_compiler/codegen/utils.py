@@ -45,6 +45,11 @@ def pluralize(name: str) -> str:
 
 
 # Types NOVA canoniques -> types Python
+# `file`/`image`/`color` sont stockés comme de simples chaînes côté backend
+# (chemin/URL pour file/image — voir codegen/api_fastapi._generate_uploads_router,
+# code hexadécimal "#rrggbb" pour color) : aucune colonne SQL spécifique
+# n'est nécessaire, tout l'enrichissement (upload, aperçu, sélecteur natif)
+# se fait côté frontend (codegen/ui_reflex.py).
 PY_TYPE_MAP = {
     "string": "str",
     "text": "str",
@@ -53,6 +58,9 @@ PY_TYPE_MAP = {
     "bool": "bool",
     "date": "date",
     "datetime": "datetime",
+    "file": "str",
+    "image": "str",
+    "color": "str",
 }
 
 # Types NOVA canoniques -> types TypeScript/JS (pour d'éventuels générateurs
@@ -65,4 +73,7 @@ DEFAULT_VALUE_MAP = {
     "bool": "False",
     "date": "None",
     "datetime": "None",
+    "file": '""',
+    "image": '""',
+    "color": '""',
 }

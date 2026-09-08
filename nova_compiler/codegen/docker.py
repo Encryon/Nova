@@ -52,11 +52,22 @@ CMD ["reflex", "run", "--env", "dev", "--backend-port", "8001", "--frontend-port
 def _compose(program: NovaProgram) -> str:
     app_name = to_snake_case(to_ascii_identifier(program.app.name)) if program.app else "nova_app"
     has_auth = program.auth is not None and program.auth.enabled
+    has_uploads = any(f.type in ("file", "image") for e in program.entities for f in e.fields)
     jwt_line = (
         "\n      # Bloc `auth { ... }` détecté : à surcharger avec une vraie valeur\n"
         "      # secrète en production (`openssl rand -hex 32`, par exemple).\n"
         "      NOVA_JWT_SECRET: nova-dev-secret-change-me"
         if has_auth
+        else ""
+    )
+    public_backend_url_line = (
+        "\n      # Champ `file`/`image` détecté : URL du backend joignable"
+        "\n      # DEPUIS LE NAVIGATEUR (aperçus/téléchargements), distincte de"
+        "\n      # NOVA_BACKEND_URL ci-dessus (appels serveur-à-serveur, nom"
+        "\n      # Docker interne \"backend\" non résolvable par le navigateur)."
+        "\n      # À surcharger avec le vrai domaine public en production."
+        "\n      NOVA_PUBLIC_BACKEND_URL: http://localhost:8000"
+        if has_uploads
         else ""
     )
     return f"""\
@@ -84,7 +95,7 @@ services:
       - "3000:3000"
       - "8001:8001"
     environment:
-      NOVA_BACKEND_URL: http://backend:8000
+      NOVA_BACKEND_URL: http://backend:8000{public_backend_url_line}
     depends_on:
       - backend
 

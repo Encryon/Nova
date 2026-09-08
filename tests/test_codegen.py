@@ -528,11 +528,20 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
     """Comme `test_generated_backend_actually_imports_and_wires_custom_router`,
     mais côté frontend : importe réellement le module Reflex généré (pas
     seulement une validation de syntaxe `ast.parse`) et appelle chaque
-    fonction de page de graphique pour vérifier que l'arbre de composants
-    `rx.recharts` se construit sans erreur — la seule façon de détecter un
-    problème de signature d'API Reflex (voir leçon apprise en développant
-    ce générateur : `data=` se pose différemment sur `pie` que sur les
-    autres types)."""
+    fonction de page pour vérifier que l'arbre de composants se construit
+    sans erreur — la seule façon de détecter un problème de signature
+    d'API Reflex (voir leçon apprise en développant ce générateur : `data=`
+    se pose différemment sur `pie` que sur les autres types de graphique).
+
+    Regroupe aussi la vérification des pages `formulaire`/`carte` sur les
+    champs riches (`image`/`fichier`/`couleur`/`booleen` ajoutés à `entité
+    Produit` dans full_featured.nova) : `rx.App()` est un singleton
+    process-wide chez Reflex (`ReflexRuntimeError: A RegistrationContext
+    can only be associated with a single App instance`), donc un second
+    test import ant un second module frontend généré échouerait s'il
+    tournait à côté de celui-ci — même pattern que la collision de
+    registre SQLAlchemy pour `app.main` (voir
+    `test_auth_and_query_flow_end_to_end`)."""
     program = parse_file(EXAMPLES / "full_featured.nova")
     generate_project(program, tmp_path, source_dir=EXAMPLES)
 
@@ -553,7 +562,208 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
         pie_page = main.top_produits_chers_chart_page()
         assert type(bar_page).__name__ == "Box"
         assert type(pie_page).__name__ == "Box"
+        # Champs riches sur `entité Produit` : formulaire (upload + color
+        # picker) et carte (miniature/lien/pastille/badge) se construisent.
+        form_page = main.nouveau_produit_page()
+        card_page = main.fiches_produits_page()
+        assert type(form_page).__name__ == "Box"
+        assert type(card_page).__name__ == "Box"
     finally:
         sys.path.remove(frontend_dir)
         for mod_name in [m for m in sys.modules if m == pkg_name or m.startswith(pkg_name + ".")]:
             del sys.modules[mod_name]
+
+
+# ----------------------------------------------------------- rich fields ---
+# Champs `file`/`image`/`color` (upload + aperçu + sélecteur natif) et
+# rendu enrichi des types existants `bool`/`date`/`datetime`/`int`/`float`
+# dans les vues table/form/card.
+
+_RICH_FIELDS_NOVA = """
+app Boutique {
+  name: "Boutique"
+}
+
+entity Article {
+  field nom: string required
+  field photo: image
+  field fiche: file
+  field couleur: color
+  field disponible: bool
+  field prix: float required
+  field rdv: datetime
+  field sortie: date
+}
+
+api Article {
+  list
+  create
+}
+
+page Catalogue {
+  show Article as table
+}
+
+page NouveauArticle {
+  show Article as form
+}
+
+page Fiches {
+  show Article as card
+}
+"""
+
+
+def _rich_fields_frontend_source(tmp_path) -> str:
+    program = parse_source(_RICH_FIELDS_NOVA)
+    generate_project(program, tmp_path)
+    frontend_files = [
+        f
+        for f in (tmp_path / "frontend").rglob("*.py")
+        if f.name not in ("rxconfig.py", "__init__.py", "custom.py")
+    ]
+    assert frontend_files, "fichier frontend principal introuvable"
+    return frontend_files[0].read_text(encoding="utf-8")
+
+
+def test_rich_field_types_map_to_str_columns_in_models(tmp_path):
+    program = parse_source(_RICH_FIELDS_NOVA)
+    generate_project(program, tmp_path)
+    models_src = (tmp_path / "backend/app/models.py").read_text(encoding="utf-8")
+    # file/image/color sont stockés comme de simples chaînes (chemin/URL ou
+    # code hex) : aucune colonne SQL dédiée, tout l'enrichissement est
+    # côté frontend.
+    assert "photo: Optional[str]" in models_src
+    assert "fiche: Optional[str]" in models_src
+    assert "couleur: Optional[str]" in models_src
+
+
+def test_uploads_router_and_static_mount_generated_when_file_field_present(tmp_path):
+    program = parse_source(_RICH_FIELDS_NOVA)
+    generate_project(program, tmp_path)
+
+    uploads_router = (tmp_path / "backend/app/routers/_uploads.py").read_text(encoding="utf-8")
+    assert 'router = APIRouter(prefix="/uploads"' in uploads_router
+    assert 'return {"url": f"/files/{stored_name}"}' in uploads_router
+
+    main_src = (tmp_path / "backend/app/main.py").read_text(encoding="utf-8")
+    assert "from fastapi.staticfiles import StaticFiles" in main_src
+    assert 'app.mount("/files", StaticFiles(directory=str(UPLOADS_DIR)), name="files")' in main_src
+    assert "app.include_router(uploads_router)" in main_src
+
+    requirements = (tmp_path / "backend/requirements.txt").read_text(encoding="utf-8")
+    assert "python-multipart" in requirements
+
+
+def test_uploads_not_generated_without_file_or_image_fields(tmp_path):
+    """Régression : un projet sans champ `file`/`image` (ex. blog.en.nova)
+    ne doit générer ni routeur d'upload, ni montage de fichiers statiques,
+    ni dépendance python-multipart superflue."""
+    program = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(program, tmp_path)
+    assert not (tmp_path / "backend/app/routers/_uploads.py").exists()
+    main_src = (tmp_path / "backend/app/main.py").read_text(encoding="utf-8")
+    assert "StaticFiles" not in main_src
+    requirements = (tmp_path / "backend/requirements.txt").read_text(encoding="utf-8")
+    assert "python-multipart" not in requirements
+
+
+def test_form_page_uses_native_pickers_for_date_datetime_number_color(tmp_path):
+    source = _rich_fields_frontend_source(tmp_path)
+    assert 'type="color"' in source
+    assert 'type="date"' in source
+    assert 'type="datetime-local"' in source
+    assert 'type="number", step="any"' in source  # champ float
+    # Upload : zone de dépôt + gestionnaire dédié, pas un rx.input texte.
+    assert "rx.upload(" in source
+    assert "async def handle_upload_photo(self, files: list[rx.UploadFile]) -> None:" in source
+    assert "async def handle_upload_fiche(self, files: list[rx.UploadFile]) -> None:" in source
+
+
+def test_table_and_card_render_image_file_color_bool_specially(tmp_path):
+    source = _rich_fields_frontend_source(tmp_path)
+    # Miniature d'image (table ET card).
+    assert source.count('rx.image(src=f"{PUBLIC_BACKEND_URL}{') >= 2
+    # Lien de téléchargement pour un champ `file`.
+    assert 'rx.link("Télécharger / Download"' in source
+    # Pastille de couleur.
+    assert 'background=row[\'couleur\']' in source
+    # Badge Oui/Non pour un booléen.
+    assert 'rx.badge("Oui / Yes", color_scheme="green")' in source
+    assert 'rx.badge("Non / No", color_scheme="gray")' in source
+
+
+def test_docker_compose_includes_public_backend_url_only_when_uploads_present(tmp_path):
+    with_uploads = parse_source(_RICH_FIELDS_NOVA)
+    generate_project(with_uploads, tmp_path / "with_uploads")
+    compose = (tmp_path / "with_uploads/docker-compose.yml").read_text(encoding="utf-8")
+    assert "NOVA_PUBLIC_BACKEND_URL: http://localhost:8000" in compose
+
+    without_uploads = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(without_uploads, tmp_path / "without_uploads")
+    compose = (tmp_path / "without_uploads/docker-compose.yml").read_text(encoding="utf-8")
+    assert "NOVA_PUBLIC_BACKEND_URL" not in compose
+
+
+def test_upload_endpoint_stores_file_and_is_served_by_static_mount(tmp_path):
+    """Exécute réellement le backend généré (pas seulement `ast.parse`) :
+    envoie un fichier à `POST /uploads/`, vérifie qu'il est bien écrit sur
+    disque et re-servi tel quel via le montage `/files`, puis qu'un
+    enregistrement peut être créé avec l'URL retournée dans un champ
+    `image`/`color`/`bool`/`date`/`datetime`."""
+    program = parse_source(_RICH_FIELDS_NOVA)
+    generate_project(program, tmp_path)
+
+    backend_dir = str(tmp_path / "backend")
+    sys.path.insert(0, backend_dir)
+    old_db_url = os.environ.get("NOVA_DATABASE_URL")
+    old_uploads_dir = os.environ.get("NOVA_UPLOADS_DIR")
+    os.environ["NOVA_DATABASE_URL"] = f"sqlite:///{tmp_path}/test_uploads.db"
+    os.environ["NOVA_UPLOADS_DIR"] = str(tmp_path / "uploads")
+    for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[mod_name]
+    try:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        with TestClient(main.app) as client:
+            resp = client.post("/uploads/", files={"file": ("photo.png", b"fake-bytes", "image/png")})
+            assert resp.status_code == 200
+            url = resp.json()["url"]
+            assert url.startswith("/files/")
+
+            served = client.get(url)
+            assert served.status_code == 200
+            assert served.content == b"fake-bytes"
+
+            payload = {
+                "nom": "Chaise",
+                "photo": url,
+                "fiche": "",
+                "couleur": "#ff0000",
+                "disponible": True,
+                "prix": 49.9,
+                "rdv": "2026-09-10T10:00:00",
+                "sortie": "2026-09-08",
+            }
+            created = client.post("/articles", json=payload)
+            assert created.status_code == 201
+
+            rows = client.get("/articles").json()
+            assert rows[0]["photo"] == url
+            assert rows[0]["couleur"] == "#ff0000"
+            assert rows[0]["disponible"] is True
+    finally:
+        sys.path.remove(backend_dir)
+        if old_db_url is None:
+            os.environ.pop("NOVA_DATABASE_URL", None)
+        else:
+            os.environ["NOVA_DATABASE_URL"] = old_db_url
+        if old_uploads_dir is None:
+            os.environ.pop("NOVA_UPLOADS_DIR", None)
+        else:
+            os.environ["NOVA_UPLOADS_DIR"] = old_uploads_dir
+        for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+            del sys.modules[mod_name]
+
+

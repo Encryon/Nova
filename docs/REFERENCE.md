@@ -49,6 +49,9 @@ identiques dans plusieurs langues).
 | Booléen / Boolean | `booleen` / `booléen` | `bool` / `boolean` | `booleano` | `boolesch` | `booleano` | `booleano` |
 | Date | `date` | `date` | `fecha` | `datum` | `data` | `data` |
 | Date + heure / Datetime | `date_heure` | `datetime` | `fecha_hora` | `datum_zeit` | `data_ora` | `data_hora` |
+| Fichier / File | `fichier` | `file` | `archivo` | `datei` | — (`file`) | `arquivo` |
+| Image | `image` | `image` | `imagen` | `bild` | `immagine` | `imagem` |
+| Couleur / Color | `couleur` | `color` | `color` | `farbe` | `colore` | `cor` |
 
 ## Actions CRUD
 

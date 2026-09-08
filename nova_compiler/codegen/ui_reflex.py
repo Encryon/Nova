@@ -217,6 +217,134 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
     return state_code, view_code
 
 
+# ---------------------------------------- champs riches (file/image/color/bool) ---
+# Un champ `file`/`fichier`, `image`, `color`/`couleur` ou `bool` mérite un
+# widget dédié plutôt qu'un `rx.input` texte générique : upload avec aperçu,
+# sélecteur de couleur natif, badge Oui/Non. Ces helpers centralisent ce
+# choix pour le formulaire (widget de saisie) et pour les vues table/card
+# (rendu de valeur) afin que les deux restent cohérents.
+
+_UPLOAD_FIELD_TYPES = ("file", "image")
+
+
+def _input_type_and_extra_kwarg(f) -> tuple[str, str]:
+    """Type HTML natif (`type="..."`) et kwarg Reflex additionnel pour un
+    champ scalaire simple (pas file/image, gérés à part avec `rx.upload`) —
+    donne un vrai sélecteur de date/heure/couleur/nombre au lieu d'un champ
+    texte brut, sans changer le type de la variable de state (toujours
+    `str`, comme avant) ni le format de la charge utile envoyée au backend."""
+    if f.type == "date":
+        return "date", ""
+    if f.type == "datetime":
+        return "datetime-local", ""
+    if f.type == "int":
+        return "number", ""
+    if f.type == "float":
+        return "number", ', step="any"'
+    if f.type == "color":
+        return "color", ""
+    return "text", ""
+
+
+def _upload_id(state_cls: str, field_snake: str) -> str:
+    return f"upload_{to_snake_case(state_cls)}_{field_snake}"
+
+
+def _upload_form_block_src(state_cls: str, f) -> str:
+    """Bloc de formulaire pour un champ `file`/`image` : zone de dépôt
+    (`rx.upload`) qui envoie le fichier au backend dès la sélection (voir
+    `handle_upload_<champ>` généré dans le state) et stocke l'URL retournée
+    dans `new_<champ>` — exactement comme les autres champs, qui portent
+    déjà cette valeur au moment de la soumission du formulaire. Un aperçu
+    (miniature pour une image, lien de téléchargement sinon) apparaît une
+    fois l'upload terminé."""
+    snake = to_snake_case(f.name)
+    upload_id = _upload_id(state_cls, snake)
+    var = f"{state_cls}.new_{snake}"
+    if f.type == "image":
+        preview = (
+            f'rx.cond({var} != "", '
+            f'rx.image(src=f"{{PUBLIC_BACKEND_URL}}{{{var}}}", width="80px", height="80px", '
+            f'radius="md", style={{"object-fit": "cover"}})),'
+        )
+    else:
+        preview = (
+            f'rx.cond({var} != "", '
+            f'rx.link({var}, href=f"{{PUBLIC_BACKEND_URL}}{{{var}}}", target="_blank", size="2")),'
+        )
+    dropzone_label = "Glisser un fichier ou cliquer / Drop a file or click"
+    return (
+        "    rx.vstack(\n"
+        f'        rx.text("{f.name}", size="2", weight="bold", color_scheme="gray"),\n'
+        "        rx.upload(\n"
+        f'            rx.text("{dropzone_label}", size="2", color_scheme="gray"),\n'
+        f'            id="{upload_id}",\n'
+        f'            on_drop={state_cls}.handle_upload_{snake}(rx.upload_files(upload_id="{upload_id}")),\n'
+        '            border="1px dashed var(--gray-8)",\n'
+        '            border_radius="var(--radius-3)",\n'
+        '            padding="1em",\n'
+        '            width="100%",\n'
+        "        ),\n"
+        f"        {preview}\n"
+        '        spacing="1",\n'
+        '        width="100%",\n'
+        "    ),"
+    )
+
+
+def _upload_handler_state_lines(state_cls: str, f) -> list[str]:
+    """Méthode de state appelée dès qu'un fichier est déposé dans la zone
+    d'upload : envoie le fichier au backend (`POST /uploads/`, voir
+    codegen/api_fastapi._generate_uploads_router) et stocke l'URL relative
+    retournée — la même variable `new_<champ>` que les autres types de
+    champ, envoyée telle quelle dans la charge utile de `submit()`."""
+    snake = to_snake_case(f.name)
+    return [
+        f"    async def handle_upload_{snake}(self, files: list[rx.UploadFile]) -> None:",
+        "        for file in files:",
+        "            data = await file.read()",
+        "            async with httpx.AsyncClient() as client:",
+        '                resp = await client.post(',
+        '                    f"{BACKEND_URL}/uploads/", files={"file": (file.name, data)}',
+        "                )",
+        "                if resp.status_code == 200:",
+        f'                    self.new_{snake} = resp.json()["url"]',
+    ]
+
+
+def _field_value_src(f, row_access: str, default_src: str) -> str:
+    """Expression Reflex (texte source) affichant la valeur d'un champ `f`
+    d'une ligne de données (`row_access`, ex. `row["prix"]`) dans une vue
+    table/card. Rendu enrichi pour les types visuels ; `default_src` (fourni
+    par l'appelant, différent entre table et card) pour tous les autres
+    types — comportement inchangé par rapport à avant l'ajout des champs
+    riches."""
+    if f.type == "image":
+        return (
+            f'rx.cond({row_access} != "", '
+            f'rx.image(src=f"{{PUBLIC_BACKEND_URL}}{{{row_access}}}", width="48px", height="48px", '
+            f'radius="md", style={{"object-fit": "cover"}}), rx.text("—"))'
+        )
+    if f.type == "file":
+        return (
+            f'rx.cond({row_access} != "", '
+            f'rx.link("Télécharger / Download", href=f"{{PUBLIC_BACKEND_URL}}{{{row_access}}}", target="_blank"), '
+            f'rx.text("—"))'
+        )
+    if f.type == "color":
+        return (
+            f'rx.hstack(rx.box(width="16px", height="16px", background={row_access}, '
+            f'border_radius="4px", border="1px solid var(--gray-6)"), rx.text({row_access}), '
+            f'spacing="2", align="center")'
+        )
+    if f.type == "bool":
+        return (
+            f'rx.cond({row_access}, rx.badge("Oui / Yes", color_scheme="green"), '
+            f'rx.badge("Non / No", color_scheme="gray"))'
+        )
+    return default_src
+
+
 # ---------------------------------------------------------------- style ---
 
 def _snake_to_camel(name: str) -> str:
@@ -440,6 +568,11 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
             snake = to_snake_case(f.name)
             state_lines.append(f"    def set_new_{snake}(self, value: str) -> None:")
             state_lines.append(f"        self.new_{snake} = value")
+        # Champs `file`/`image` : pas de setter texte, un gestionnaire
+        # d'upload à la place (voir `_upload_handler_state_lines`).
+        for f in fields:
+            if f.type in _UPLOAD_FIELD_TYPES:
+                state_lines += _upload_handler_state_lines(state_cls, f)
 
     auth_header_lines = []
     if is_protected:
@@ -488,7 +621,12 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
     # ---- vue -------------------------------------------------------------
     if show.mode == "table":
         header_cells = ", ".join(f'rx.table.column_header_cell("{f.name}")' for f in fields)
-        row_cells = ", ".join(f'rx.table.cell(row["{to_snake_case(f.name)}"])' for f in fields)
+
+        def _table_cell_src(f) -> str:
+            access = f"row['{to_snake_case(f.name)}']"
+            return f"rx.table.cell({_field_value_src(f, access, access)})"
+
+        row_cells = ", ".join(_table_cell_src(f) for f in fields)
         create_page = _form_page_for_entity(program, show.entity)
         create_link = (
             f'rx.link(rx.button("+ {create_page.name}", size="2"), href="{_page_route(create_page)}"),'
@@ -526,11 +664,16 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         field_blocks = []
         for f in fields:
             snake = to_snake_case(f.name)
+            if f.type in _UPLOAD_FIELD_TYPES:
+                field_blocks.append(_upload_form_block_src(state_cls, f))
+                continue
+            input_type, extra_kwarg = _input_type_and_extra_kwarg(f)
+            type_kwarg = f', type="{input_type}"' if input_type != "text" else ""
             field_blocks.append(
                 "    rx.vstack(\n"
                 f'        rx.text("{f.name}", size="2", weight="bold", color_scheme="gray"),\n'
                 f'        rx.input(placeholder="{f.name}", value={state_cls}.new_{snake}, '
-                f"on_change={state_cls}.set_new_{snake}, size=\"3\", width=\"100%\"),\n"
+                f"on_change={state_cls}.set_new_{snake}, size=\"3\", width=\"100%\"{type_kwarg}{extra_kwarg}),\n"
                 '        spacing="1",\n'
                 '        width="100%",\n'
                 "    ),"
@@ -552,9 +695,13 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         )
         container_width = "560px"
     else:  # card
-        card_rows = ", ".join(
-            f'rx.text(f"{f.name}: {{row[\'{to_snake_case(f.name)}\']}}")' for f in fields
-        )
+
+        def _card_value_src(f) -> str:
+            access = f"row['{to_snake_case(f.name)}']"
+            default_src = f'rx.text(f"{f.name}: {{{access}}}")'
+            return _field_value_src(f, access, default_src)
+
+        card_rows = ", ".join(_card_value_src(f) for f in fields)
         inner = (
             "rx.vstack(\n"
             f'    rx.heading("{title}", size="7"),\n'
@@ -597,6 +744,12 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         "import reflex as rx",
         "",
         'BACKEND_URL = os.environ.get("NOVA_BACKEND_URL", "http://localhost:8000")',
+        "# URL du backend joignable DEPUIS LE NAVIGATEUR (aperçus d'image, liens de",
+        "# téléchargement d'un champ `file`/`image`) — distincte de BACKEND_URL",
+        "# ci-dessus (utilisée côté serveur, dans les gestionnaires de State) : en",
+        "# Docker, BACKEND_URL vaut \"http://backend:8000\" (nom de service interne,",
+        "# invisible du navigateur), d'où NOVA_PUBLIC_BACKEND_URL séparée.",
+        'PUBLIC_BACKEND_URL = os.environ.get("NOVA_PUBLIC_BACKEND_URL", BACKEND_URL)',
         "",
         "",
     ]

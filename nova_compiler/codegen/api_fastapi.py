@@ -263,6 +263,7 @@ def _generate_main(program: NovaProgram) -> str:
     app_name = program.app.name if program.app else "NovaApp"
     has_auth = program.auth is not None and program.auth.enabled
     has_queries = bool(program.queries)
+    has_uploads = _has_uploads(program)
     lines = [
         _HEADER,
         "from __future__ import annotations",
@@ -272,6 +273,10 @@ def _generate_main(program: NovaProgram) -> str:
         "",
         "from fastapi import FastAPI",
         "from fastapi.middleware.cors import CORSMiddleware",
+    ]
+    if has_uploads:
+        lines.append("from fastapi.staticfiles import StaticFiles")
+    lines += [
         "",
         "from .database import init_db",
         "from . import routers_custom",
@@ -280,6 +285,8 @@ def _generate_main(program: NovaProgram) -> str:
         lines.append("from .auth import router as auth_router")
     if has_queries:
         lines.append("from .routers._requetes import router as requetes_router")
+    if has_uploads:
+        lines.append("from .routers._uploads import router as uploads_router, UPLOADS_DIR")
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
@@ -304,10 +311,17 @@ def _generate_main(program: NovaProgram) -> str:
         "",
         "",
     ]
+    if has_uploads:
+        # Chemin distinct de "/uploads" (le routeur POST ci-dessous) pour
+        # éviter tout conflit de préfixe entre le Mount ASGI (fichiers
+        # statiques, GET) et l'APIRouter (upload, POST).
+        lines.append('app.mount("/files", StaticFiles(directory=str(UPLOADS_DIR)), name="files")')
     if has_auth:
         lines.append("app.include_router(auth_router)")
     if has_queries:
         lines.append("app.include_router(requetes_router)")
+    if has_uploads:
+        lines.append("app.include_router(uploads_router)")
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
@@ -532,13 +546,63 @@ def _generate_query_router(program: NovaProgram) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _has_uploads(program: NovaProgram) -> bool:
+    """True si au moins un champ `file`/`fichier` ou `image` existe quelque
+    part dans le programme — déclenche la génération du routeur d'upload et
+    du montage de fichiers statiques (voir `_generate_uploads_router` et
+    `_generate_main`)."""
+    return any(f.type in ("file", "image") for e in program.entities for f in e.fields)
+
+
+_UPLOADS_ROUTER_TEMPLATE = _HEADER + '''\
+from __future__ import annotations
+
+import os
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, File, UploadFile
+
+# Dossier de stockage des fichiers envoyés via un champ `file`/`fichier` ou
+# `image` du DSL. Chemin surchargeable via NOVA_UPLOADS_DIR (relatif au
+# répertoire de travail du conteneur backend — déjà persistant via le volume
+# Docker `backend_data:/app`, voir codegen/docker.py, comme la base SQLite).
+UPLOADS_DIR = Path(os.environ.get("NOVA_UPLOADS_DIR", "uploads"))
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+router = APIRouter(prefix="/uploads", tags=["uploads"])
+
+
+@router.post("/")
+async def upload_file(file: UploadFile = File(...)):
+    """Reçoit un fichier et retourne son URL publique (`/files/<nom>`, servie
+    par le montage `StaticFiles` de app/main.py) — à stocker telle quelle
+    dans le champ `file`/`image` de l'entité concernée. Le formulaire Reflex
+    généré fait cet appel automatiquement dès qu'un fichier est sélectionné,
+    avant de soumettre le reste du formulaire (voir codegen/ui_reflex.py)."""
+    suffix = Path(file.filename or "").suffix
+    stored_name = f"{uuid.uuid4().hex}{suffix}"
+    dest = UPLOADS_DIR / stored_name
+    content = await file.read()
+    dest.write_bytes(content)
+    return {"url": f"/files/{stored_name}"}
+'''
+
+
 def generate_backend(program: NovaProgram) -> dict[str, str]:
     has_auth = program.auth is not None and program.auth.enabled
     has_queries = bool(program.queries)
+    has_uploads = _has_uploads(program)
 
     requirements = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "sqlmodel>=0.0.16"]
     if has_auth:
         requirements += ["bcrypt>=4.0", "python-jose[cryptography]>=3.3", "python-multipart>=0.0.9"]
+    elif has_uploads:
+        # python-multipart est requis par FastAPI pour parser tout endpoint
+        # `UploadFile = File(...)` — déjà tiré par `has_auth` ci-dessus
+        # (formulaire OAuth2), mais un projet sans `auth` avec un champ
+        # `file`/`image` en a besoin tout autant.
+        requirements.append("python-multipart>=0.0.9")
 
     files: dict[str, str] = {
         "backend/app/__init__.py": "",
@@ -552,6 +616,8 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
         files["backend/app/auth.py"] = _generate_auth(program)
     if has_queries:
         files["backend/app/routers/_requetes.py"] = _generate_query_router(program)
+    if has_uploads:
+        files["backend/app/routers/_uploads.py"] = _UPLOADS_ROUTER_TEMPLATE
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:

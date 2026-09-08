@@ -32,7 +32,7 @@ class Field:
         return self.type not in _SCALAR_TYPES
 
 
-_SCALAR_TYPES = {"string", "text", "int", "float", "bool", "date", "datetime"}
+_SCALAR_TYPES = {"string", "text", "int", "float", "bool", "date", "datetime", "file", "image", "color"}
 
 
 @dataclass

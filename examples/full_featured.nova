@@ -13,6 +13,10 @@ entité Produit {
   champ nom: chaine requis
   champ prix: decimal
   champ stock: entier
+  champ photo: image
+  champ fiche: fichier
+  champ couleur: couleur
+  champ disponible: booleen
 }
 
 auth {
@@ -38,6 +42,18 @@ page Produits {
     couleur_fond: "#445566"
     classe: "carte-produit"
   }
+}
+
+// Page formulaire : exerce les pickers natifs (upload fichier/image,
+// sélecteur de couleur) générés pour les champs riches ci-dessus.
+page NouveauProduit {
+  afficher Produit comme formulaire titre "Nouveau produit"
+}
+
+// Page carte : exerce le rendu riche (miniature image, lien de
+// téléchargement, pastille de couleur, badge booléen) en mode carte.
+page FichesProduits {
+  afficher Produit comme carte titre "Fiches produits"
 }
 
 // Graphique sur l'entité (protégé, hérite de `api Produit { proteger: admin }`)

@@ -36,6 +36,9 @@ type_ref: TYPE_STRING
         | TYPE_BOOL
         | TYPE_DATE
         | TYPE_DATETIME
+        | TYPE_FILE
+        | TYPE_IMAGE
+        | TYPE_COLOR
         | NAME                 // reference to another entity (relation by field)
 relation_decl: HAS_MANY_KW NAME
              | BELONGS_TO_KW NAME
@@ -140,6 +143,9 @@ TYPE_FLOAT: "float" | "decimal" | "décimal" | "flotante" | "gleitkomma" | "deci
 TYPE_BOOL: "bool" | "boolean" | "booleen" | "booléen" | "booleano" | "boolesch"
 TYPE_DATE: "date" | "fecha" | "datum" | "data"
 TYPE_DATETIME: "datetime" | "date_heure" | "fecha_hora" | "datum_zeit" | "data_ora" | "data_hora"
+TYPE_FILE: "file" | "fichier" | "archivo" | "datei" | "arquivo"
+TYPE_IMAGE: "image" | "imagen" | "bild" | "immagine" | "imagem"
+TYPE_COLOR: "color" | "couleur" | "farbe" | "colore" | "cor"
 
 BOOL_TRUE: "true" | "vrai" | "verdadero" | "wahr" | "vero" | "verdadeiro"
 BOOL_FALSE: "false" | "faux" | "falso" | "falsch"
