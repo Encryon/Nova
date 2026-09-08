@@ -1,17 +1,19 @@
 <div align="center">
 
+<img src="docs/logo.png" alt="NOVA" width="220" />
+
 # NOVA
 
 **Un DSL bilingue (FR/EN) d'intention métier qui compile vers une API FastAPI, une UI Reflex, des images Docker et des manifests Kubernetes/Helm.**
 **A bilingual (FR/EN) business-intent DSL that compiles to a FastAPI API, a Reflex UI, Docker images and Kubernetes/Helm manifests.**
 
-![Statut](https://img.shields.io/badge/statut-priv%C3%A9%20%2F%20interne-6e4bf0)
+![Statut](https://img.shields.io/badge/statut-fair--source%20/%20open-6e4bf0)
 ![Version](https://img.shields.io/badge/version-0.2.0-6e4bf0)
 ![Python](https://img.shields.io/badge/python-3.11%2B-6e4bf0)
 ![Tests](https://img.shields.io/badge/tests-22%20passed-2f9e6e)
-![Licence](https://img.shields.io/badge/licence-propri%C3%A9taire%20ENC--SOFT%2FEncryon-a8630f)
+![Licence](https://img.shields.io/badge/licence-BSL%201.1%20→%20Apache%202.0-a8630f)
 
-[🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture)
+[🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Licence](#licence--license)
 
 </div>
 
@@ -27,10 +29,21 @@ examples (`examples/`), tests (`tests/`), and the Visual Studio Code
 extension (`vscode-extension/`) for writing `.nova` files with syntax
 highlighting and snippets in either language.
 
-> **Confidentialité / Confidentiality** — Dépôt privé ENC-SOFT / Encryon,
-> usage interne et partenaires techniques uniquement. Private ENC-SOFT /
-> Encryon repository, internal and technical-partner use only. Voir
-> [Licence](#licence--license) en bas de page.
+> **Fair-source / Code source ouvert** — NOVA est distribué sous
+> [Business Source License 1.1](LICENSE.md) : le code est ouvert et
+> lisible par tous dès aujourd'hui, gratuit pour tout usage
+> non-commercial, et bascule automatiquement sous licence Apache 2.0
+> (100% permissive) quatre ans après chaque publication. Un usage
+> commercial nécessite une licence payante — écrivez à
+> **licensing@encryon.io**. Voir [Licence](#licence--license) en bas de
+> page pour le détail.
+>
+> NOVA is distributed under the [Business Source License 1.1](LICENSE.md):
+> the code is open and readable by everyone today, free for any
+> non-commercial use, and automatically converts to the fully permissive
+> Apache 2.0 license four years after each release. Commercial use
+> requires a paid license — reach out to **licensing@encryon.io**. See
+> [License](#licence--license) at the bottom of this page for details.
 
 ## Démarrage rapide / Quickstart
 
@@ -397,10 +410,27 @@ just a syntax check.
 
 ## Licence / License
 
-Propriétaire — ENC-SOFT / Encryon. Usage interne et partenaires
-techniques uniquement, sauf accord contraire. Ce dépôt est **privé** ;
-ne pas redistribuer le code sans autorisation.
+**Business Source License 1.1** (fair-source) — texte complet dans
+[`LICENSE.md`](LICENSE.md).
 
-Proprietary — ENC-SOFT / Encryon. Internal and technical-partner use
-only, unless otherwise agreed. This repository is **private**; do not
-redistribute the code without authorization.
+- 🇫🇷 **Gratuit** pour tout usage non-commercial : projets personnels,
+  formation, évaluation, contributions à ce dépôt.
+- 🇫🇷 **Usage commercial** (en entreprise, dans un produit ou service
+  vendu, en hébergement) → licence commerciale requise auprès d'Encryon
+  (ENC-SOFT) : **licensing@encryon.io**.
+- 🇫🇷 **Bascule automatique** vers la licence **Apache 2.0** (permissive)
+  quatre ans après la publication de chaque version — pour la v0.2.0,
+  le **2030-09-08**.
+
+- 🇬🇧 **Free** for any non-commercial use: personal projects, education,
+  evaluation, contributions to this repository.
+- 🇬🇧 **Commercial use** (inside a business, in a product or service you
+  sell, or as a hosted offering) → requires a commercial license from
+  Encryon (ENC-SOFT): **licensing@encryon.io**.
+- 🇬🇧 **Automatic conversion** to the permissive **Apache 2.0** license
+  four years after each version's publication — for v0.2.0, on
+  **2030-09-08**.
+
+Le code, les marques « NOVA » et le logo restent la propriété d'Encryon /
+ENC-SOFT. The NOVA code, name, and logo remain the property of Encryon /
+ENC-SOFT.
