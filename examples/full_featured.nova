@@ -17,6 +17,7 @@ entité Produit {
   champ fiche: fichier
   champ couleur: couleur
   champ disponible: booleen
+  champ date_ajout: date_heure
 }
 
 auth {
@@ -70,4 +71,11 @@ chart TopProduitsChers sur ProduitsChers {
   axe_x: nom
   axe_y: prix
   titre: "Top produits chers"
+}
+
+// Calendrier sur l'entité (protégé, hérite de `api Produit { proteger: admin }`) :
+// vue mensuelle des produits par date d'ajout.
+calendrier Ajouts sur Produit {
+  champ_date: date_ajout
+  champ_titre: nom
 }

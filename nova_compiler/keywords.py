@@ -156,6 +156,21 @@ EMAIL_PROP_ALIASES = {
 }
 
 
+# ---- bloc `calendar { ... }` (vue calendrier) -----------------------------
+# Même philosophie que CHART_PROP_ALIASES/EMAIL_PROP_ALIASES ci-dessus : les
+# clés du bloc `calendar` (`champ_date`/`date_field`, `champ_titre`/
+# `title_field`) sont des NAME libres résolues ici plutôt que des mots-clés
+# de grammaire.
+CALENDAR_PROP_ALIASES = {
+    "champ_date": "date_field", "date_field": "date_field",
+    "campo_fecha": "date_field", "datumsfeld": "date_field",
+    "campo_data": "date_field",
+    "champ_titre": "title_field", "title_field": "title_field",
+    "campo_titulo": "title_field", "campo_título": "title_field",
+    "titelfeld": "title_field", "campo_titolo": "title_field",
+}
+
+
 def strip_quotes(raw: str) -> str:
     """'"Hello"' -> 'Hello'"""
     return raw[1:-1] if raw.startswith('"') and raw.endswith('"') else raw

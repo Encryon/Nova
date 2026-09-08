@@ -15,6 +15,7 @@ statement: app_decl
          | query_decl
          | chart_decl
          | email_decl
+         | calendar_decl
 
 // ---------------------------------------------------------------- app -----
 // Optional single block describing the application itself.
@@ -118,6 +119,19 @@ email_decl: EMAIL_KW "{" email_prop* "}"
 email_prop: NAME ":" email_value
 email_value: STRING | NUMBER | BOOL_TRUE | BOOL_FALSE | NAME
 
+// ------------------------------------------------------------ calendar -----
+// Calendrier déclaratif : `sur <NAME>` référence une entité (vue mensuelle
+// des enregistrements dont un champ date/date_heure tombe dans le mois
+// affiché). Comme `chart`/`email`, les propriétés (`champ_date`/`date_field`,
+// `champ_titre`/`title_field`) sont des NAME libres résolues via
+// `keywords.CALENDAR_PROP_ALIASES`, pas des terminaux dédiés par langue.
+// `calendar_value` est un non-terminal dédié (pas le `value` générique) pour
+// la même raison que `chart_value`/`email_value` — voir le commentaire
+// au-dessus de `chart_prop`.
+calendar_decl: CALENDAR_KW NAME SUR_KW NAME "{" calendar_prop* "}"
+calendar_prop: NAME ":" calendar_value
+calendar_value: STRING | NAME
+
 // ================================================== multilingual terminals ===
 APP_KW: "app" | "application" | "aplicacion" | "aplicación" | "anwendung" | "applicazione" | "aplicacao" | "aplicação"
 ENTITY_KW: "entity" | "entité" | "entite" | "entidad" | "entitaet" | "entität" | "entita" | "entità" | "entidade"
@@ -154,6 +168,8 @@ DEFAULT_ROLE_KW: "role_par_defaut" | "role_par_défaut" | "default_role" | "rol_
 CHART_KW: "chart" | "graphique" | "grafico" | "gráfico" | "diagramm"
 
 EMAIL_KW: "email" | "courriel" | "correo" | "correio"
+
+CALENDAR_KW: "calendar" | "calendrier" | "calendario" | "calendário" | "kalender"
 
 QUERY_KW: "requete" | "requête" | "query" | "consulta" | "abfrage" | "interrogazione"
 SUR_KW: "sur" | "on" | "from" | "en" | "von" | "su" | "em"

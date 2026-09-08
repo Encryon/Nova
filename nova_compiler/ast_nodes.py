@@ -135,6 +135,21 @@ class Email:
 
 
 @dataclass
+class Calendar:
+    """Bloc `calendar <Nom> sur <Entite> { ... }` : vue calendrier mensuelle
+    déclarative. `date_field` : champ date/date_heure de l'entité utilisé
+    pour placer chaque enregistrement dans la grille du mois — si omis,
+    résolu au premier champ date/datetime de l'entité (voir
+    parser.py::_validate_calendars). `title_field` : champ affiché dans
+    chaque cellule du jour — si omis, aucun libellé n'est affiché au-delà du
+    numéro du jour (voir codegen/ui_reflex.py)."""
+    name: str
+    entity: str
+    date_field: Optional[str] = None
+    title_field: Optional[str] = None
+
+
+@dataclass
 class NovaProgram:
     app: Optional[App] = None
     entities: list[Entity] = field(default_factory=list)
@@ -144,6 +159,7 @@ class NovaProgram:
     queries: list[Query] = field(default_factory=list)
     charts: list[Chart] = field(default_factory=list)
     email: Optional[Email] = None
+    calendars: list[Calendar] = field(default_factory=list)
 
     def get_entity(self, name: str) -> Optional[Entity]:
         return next((e for e in self.entities if e.name == name), None)

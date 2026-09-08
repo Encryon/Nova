@@ -535,13 +535,18 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
 
     Regroupe aussi la vérification des pages `formulaire`/`carte` sur les
     champs riches (`image`/`fichier`/`couleur`/`booleen` ajoutés à `entité
-    Produit` dans full_featured.nova) : `rx.App()` est un singleton
-    process-wide chez Reflex (`ReflexRuntimeError: A RegistrationContext
-    can only be associated with a single App instance`), donc un second
-    test import ant un second module frontend généré échouerait s'il
-    tournait à côté de celui-ci — même pattern que la collision de
-    registre SQLAlchemy pour `app.main` (voir
-    `test_auth_and_query_flow_end_to_end`)."""
+    Produit` dans full_featured.nova) et de la page `calendrier` (`calendrier
+    Ajouts sur Produit { champ_date: date_ajout ... }`, ajoutée pour la même
+    raison) : `rx.App()` est un singleton process-wide chez Reflex
+    (`ReflexRuntimeError: A RegistrationContext can only be associated with
+    a single App instance`), donc un second test important un second module
+    frontend généré échouerait s'il tournait à côté de celui-ci — même
+    pattern que la collision de registre SQLAlchemy pour `app.main` (voir
+    `test_auth_and_query_flow_end_to_end`). C'est précisément cette
+    vérification qui a révélé le `ForeachVarError` initial rencontré pendant
+    la conception du bloc `calendar` (foreach imbriqué sur une valeur
+    `list[str]` dans un dict), corrigé en aplatissant les événements du jour
+    en une seule chaîne (`events_text`, voir codegen/ui_reflex.py)."""
     program = parse_file(EXAMPLES / "full_featured.nova")
     generate_project(program, tmp_path, source_dir=EXAMPLES)
 
@@ -568,6 +573,21 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
         card_page = main.fiches_produits_page()
         assert type(form_page).__name__ == "Box"
         assert type(card_page).__name__ == "Box"
+        # Calendrier sur `entité Produit` (protégé, `champ_date: date_ajout`).
+        calendar_page = main.ajouts_calendar_page()
+        assert type(calendar_page).__name__ == "Box"
+        # `_build_days` construit une grille de jours plate (pas de valeur
+        # imbriquée de type liste) : vérifié directement, indépendamment du
+        # rendu Reflex.
+        state = main.AjoutsCalendarState()
+        state.rows = [
+            {"nom": "Chaise", "date_ajout": f"{state.year:04d}-{state.month:02d}-01T10:00:00"}
+        ]
+        state._build_days()
+        assert len(state.days) % 7 == 0
+        first_of_month = next(d for d in state.days if d["day"] == 1 and d["in_month"])
+        assert first_of_month["events_text"] == "Chaise"
+        assert all(set(d.keys()) == {"date", "day", "in_month", "events_text"} for d in state.days)
     finally:
         sys.path.remove(frontend_dir)
         for mod_name in [m for m in sys.modules if m == pkg_name or m.startswith(pkg_name + ".")]:
@@ -951,5 +971,90 @@ def test_email_send_failure_never_breaks_the_api_response(tmp_path):
             os.environ["NOVA_DATABASE_URL"] = old_db_url
         for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
             del sys.modules[mod_name]
+
+
+# --------------------------------------------------------------- calendar ---
+# Bloc `calendar <Nom> sur <Entite> { ... }` : vue calendrier mensuelle,
+# grille calculée côté serveur avec la seule stdlib (`calendar`/`datetime`),
+# voir codegen/ui_reflex.py.
+
+_CALENDAR_NOVA = """
+app Agenda {
+  name: "Agenda"
+}
+
+entity Event {
+  field title: string required
+  field starts_at: datetime required
+  field location: string
+}
+
+api Event {
+  list
+  create
+  get
+}
+
+page Events {
+  show Event as table
+}
+
+calendar EventCal sur Event {
+  champ_date: starts_at
+  champ_titre: title
+}
+"""
+
+
+def test_calendar_generates_state_route_and_navbar_link(tmp_path):
+    program = parse_source(_CALENDAR_NOVA)
+    generate_project(program, tmp_path)
+    source = _frontend_main_source(tmp_path)
+
+    assert "import calendar" in source
+    assert "from datetime import date" in source
+    assert "class EventCalCalendarState(rx.State):" in source
+    assert 'resp = await client.get(f"{BACKEND_URL}/events/")' in source
+    assert 'str(row.get("starts_at", ""))[:10] == iso' in source
+    assert 'str(row.get("title", ""))' in source
+    assert "def event_cal_calendar_page() -> rx.Component:" in source
+    assert 'app.add_page(event_cal_calendar_page, route="/calendriers/event-cal"' in source
+    # Lien de navigation vers le calendrier, comme pour une page/un graphique.
+    assert 'rx.link("EventCal", href="/calendriers/event-cal"' in source
+
+
+def test_calendar_without_title_field_uses_bullet_marker():
+    from nova_compiler.codegen.ui_reflex import generate_frontend
+
+    src = """
+    entity Event {
+        field starts_at: date required
+    }
+    calendar C sur Event { }
+    """
+    program = parse_source(src)
+    files = generate_frontend(program)
+    main_src = next(v for k, v in files.items() if k.endswith(".py") and "custom" not in k and "rxconfig" not in k)
+    assert 'events_text = ", ".join(' in main_src
+    assert '"•"' in main_src
+
+
+def test_calendar_not_generated_without_calendar_block(tmp_path):
+    """Régression : un projet sans bloc `calendar` (ex. blog.en.nova) ne
+    doit générer ni état calendrier, ni import de la stdlib `calendar`."""
+    program = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(program, tmp_path)
+    source = _frontend_main_source(tmp_path)
+    assert "CalendarState" not in source
+    assert "import calendar" not in source
+    assert "from datetime import date" not in source
+
+
+# NB : la vérification d'exécution réelle (import du module Reflex généré +
+# construction du composant de page calendrier) est regroupée dans
+# `test_chart_frontend_module_actually_imports_and_builds_all_pages`
+# ci-dessus, sur `full_featured.nova` (`calendrier Ajouts sur Produit`) —
+# pas un test séparé ici : `rx.App()` est un singleton process-wide chez
+# Reflex, voir le docstring de ce test.
 
 

@@ -189,6 +189,52 @@ d'environnement `NOVA_SMTP_PASSWORD` (voir README, section
 "Notifications par email"). `notifier:` sans bloc `email { ... }`
 déclaré dans le même fichier lève une erreur à la compilation.
 
+## Calendrier (bloc `calendar <Nom> sur <Entité> { ... }`)
+
+| Mot-clé | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Bloc calendar / Calendar block | `calendrier` | `calendar` | `calendario` | `kalender` | `calendario` | `calendário` |
+| Sur (source) / On (source) | `sur` | `on` / `from` | `en` | `von` | `su` | `em` |
+
+Comme pour `chart`/`email` ci-dessus, les propriétés à l'intérieur de
+`calendar { ... }` (`champ_date`/`date_field`, `champ_titre`/
+`title_field`) sont des alias déclarés dans
+`keywords.CALENDAR_PROP_ALIASES`, pas des mots-clés de grammaire
+dédiés :
+
+| Propriété | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Champ date / Date field | `champ_date` | `date_field` | `campo_fecha` | `datumsfeld` | `campo_data` | `campo_data` |
+| Champ titre / Title field | `champ_titre` | `title_field` | `campo_titulo` | `titelfeld` | `campo_titolo` | `campo_titulo` |
+
+`sur`/`on` référence toujours une **entité** déclarée (données = son
+API liste, protection JWT héritée de `api <Entité> { proteger: <rôle>
+}` si présent, comme pour `chart`) :
+
+```
+calendrier Ajouts sur Produit {
+  champ_date: date_ajout
+  champ_titre: nom
+}
+```
+
+- `champ_date`/`date_field` : doit être un champ `date`/`date_heure`
+  de l'entité — s'il est omis, résolu automatiquement au premier champ
+  `date`/`date_heure` déclaré sur l'entité ; une erreur de compilation
+  est levée si l'entité n'en a aucun, ou si la valeur fournie
+  explicitement n'est pas un champ `date`/`date_heure` de l'entité.
+- `champ_titre`/`title_field` : optionnel, doit exister sur l'entité
+  s'il est fourni ; sans lui, un simple marqueur « • » signale un jour
+  ayant des enregistrements.
+- Une référence `sur` inconnue lève également une erreur à la
+  compilation (`calendar X sur Y` où `Y` n'est pas une entité
+  déclarée), pas une page qui échoue silencieusement au premier
+  chargement.
+- Génère une page Reflex dédiée (route `/calendriers/<nom>`) avec une
+  grille mensuelle calculée côté serveur via la seule bibliothèque
+  standard Python (`calendar`, `datetime`) — aucune dépendance JS
+  supplémentaire, vue lecture seule dans ce MVP.
+
 ## Exemple : le même programme en 4 langues / Example: the same program in 4 languages
 
 ```

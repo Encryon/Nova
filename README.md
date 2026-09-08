@@ -427,6 +427,43 @@ généré. Comportements à connaître :
   ni de pièce jointe dans ce MVP ; pour un contenu personnalisé, appelez
   `send_email(subject=..., body=..., to=...)` depuis `routers_custom/`.
 
+### Calendrier (`calendar`)
+
+Un bloc `calendar <Nom> sur <Entité> { ... }` génère automatiquement sa
+propre page Reflex (route `/calendriers/<nom>`, lien ajouté à la barre de
+navigation) affichant une **vue mensuelle** des enregistrements de
+l'entité — grille calculée côté serveur avec la seule bibliothèque
+standard Python (`calendar`, `datetime`), **aucune dépendance JS
+supplémentaire** :
+
+```
+calendrier Ajouts sur Produit {
+  champ_date: date_ajout
+  champ_titre: nom
+}
+```
+
+- `champ_date`/`date_field` : champ `date`/`date_heure` de l'entité
+  utilisé pour placer chaque enregistrement dans le mois affiché — si
+  omis, résolu automatiquement au premier champ `date`/`date_heure`
+  déclaré sur l'entité (erreur à la compilation si l'entité n'en a
+  aucun).
+- `champ_titre`/`title_field` : champ affiché dans la case du jour
+  concerné (les titres du même jour sont regroupés, séparés par des
+  virgules) — si omis, un simple marqueur « • » signale qu'un jour a des
+  enregistrements.
+- Boutons `<`/`>` pour naviguer entre les mois (tout est recalculé côté
+  serveur, aucun rechargement de page) ; protection JWT héritée
+  automatiquement si `api <Entité> { ... proteger: <rôle> }` est présent,
+  comme pour `chart`.
+- Une référence `sur` inconnue, un `champ_date` qui n'est pas un champ
+  `date`/`date_heure` de l'entité, ou un `champ_titre` inexistant sont
+  détectés à la compilation (`nova check`/`nova compile`), jamais au
+  premier chargement de la page.
+- Vue lecture seule dans ce MVP (pas de création/déplacement
+  d'événement directement depuis le calendrier) — utilisez la page
+  `formulaire` de l'entité pour ajouter un enregistrement.
+
 ### Aller au-delà du DSL : points d'extension "custom"
 
 Le DSL couvre le CRUD et l'UI simples. Pour tout le reste — requêtes
@@ -470,21 +507,23 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-65 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+75 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
 validité syntaxique du code généré, clés étrangères, setters de
 formulaire Reflex, validation regex, style CSS, graphiques (`chart`,
 4 types, source entité/requête), champs riches `fichier`/`image`/
 `couleur` (upload, pickers natifs, rendu tableau/carte enrichi),
-notifications email (`email` + `notifier:`), points d'extension custom
-— dont plusieurs tests qui **importent réellement** le backend et le
-frontend générés (pas seulement une vérification de syntaxe) : flux
-JWT complet (inscription, connexion, rôles, routes protégées) et
-route de requête déclarative via `TestClient`, upload de fichier réel
-servi par le montage statique, notification email envoyée sur
-create/delete (connexion SMTP simulée, reste du code réellement
-exécuté) et échec SMTP n'interrompant jamais la requête, et
-construction effective de l'arbre de composants Reflex de chaque
-page (graphique, formulaire avec zone d'upload, carte).
+notifications email (`email` + `notifier:`), calendrier (`calendar`,
+résolution du champ date par défaut, alias multilingues, cas d'erreur),
+points d'extension custom — dont plusieurs tests qui **importent
+réellement** le backend et le frontend générés (pas seulement une
+vérification de syntaxe) : flux JWT complet (inscription, connexion,
+rôles, routes protégées) et route de requête déclarative via
+`TestClient`, upload de fichier réel servi par le montage statique,
+notification email envoyée sur create/delete (connexion SMTP simulée,
+reste du code réellement exécuté) et échec SMTP n'interrompant jamais
+la requête, et construction effective de l'arbre de composants Reflex
+de chaque page (graphique, calendrier avec grille de jours calculée
+côté serveur, formulaire avec zone d'upload, carte).
 
 ### Limites connues du MVP
 
@@ -512,9 +551,13 @@ page (graphique, formulaire avec zone d'upload, carte).
   automatiquement (sujet + id de l'enregistrement) — pas de template
   HTML, de pièce jointe, ni de destinataire dynamique par enregistrement
   dans ce MVP ; pour un contenu personnalisé, `routers_custom/`.
-- Pas de calendrier interactif, pas de contenu ou de texte d'interface
-  multilingue au runtime (langue du site fixée par `application {
-  langue: ... }`) — phases prévues mais pas encore livrées.
+- Le bloc `calendar` est une vue mensuelle en lecture seule (pas de
+  création/déplacement d'événement par glisser-déposer directement sur
+  la grille, pas de vue semaine/jour) ; pour une interaction plus riche,
+  `frontend/<app>/custom.py`.
+- Pas de contenu ou de texte d'interface multilingue au runtime (langue
+  du site fixée par `application { langue: ... }`) — phase prévue mais
+  pas encore livrée.
 - Pas encore de NOVA Studio (IDE dédié), Marketplace, NOVA Cloud, NOVA AI
   — ce dépôt couvre le compilateur (Phase 1/2 de la feuille de route).
 
@@ -857,6 +900,40 @@ know about:
   or attachment in this MVP; for custom content, call
   `send_email(subject=..., body=..., to=...)` from `routers_custom/`.
 
+### Calendar (`calendar`)
+
+A `calendar <Name> on <Entity> { ... }` block automatically generates
+its own Reflex page (route `/calendriers/<name>`, link added to the
+navigation bar) showing a **monthly view** of the entity's records —
+the grid is computed server-side using only the Python standard
+library (`calendar`, `datetime`), **no extra JS dependency**:
+
+```
+calendar Additions on Product {
+  date_field: added_at
+  title_field: name
+}
+```
+
+- `date_field`: the entity's `date`/`datetime` field used to place
+  each record on the displayed month — if omitted, automatically
+  resolved to the entity's first declared `date`/`datetime` field
+  (compile-time error if the entity has none).
+- `title_field`: field shown in the cell for the day it falls on
+  (multiple titles for the same day are joined with commas) — if
+  omitted, a simple "•" marker flags a day that has records.
+- `<`/`>` buttons to navigate between months (everything is
+  recomputed server-side, no page reload); JWT protection is
+  automatically inherited if `api <Entity> { ... protect: <role> }`
+  is present, same as `chart`.
+- An unknown `on` reference, a `date_field` that isn't a
+  `date`/`datetime` field of the entity, or a nonexistent
+  `title_field` are all caught at compile time (`nova check`/`nova
+  compile`), never on first page load.
+- Read-only view in this MVP (no creating/moving an event directly
+  from the calendar grid) — use the entity's `form` page to add a
+  record.
+
 ### Beyond the DSL: "custom" extension points
 
 The DSL covers simple CRUD and UI. For everything else — complex
@@ -900,20 +977,22 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-65 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+75 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
 generated-code syntactic validity, foreign keys, explicit Reflex form
 setters, regex validation, CSS styling, charts (`chart`, 4 types,
 entity/query source), rich `file`/`image`/`color` fields (upload,
 native pickers, enriched table/card rendering), email notifications
-(`email` + `notifier:`), custom extension points — including several
-tests that **actually import** the generated backend and frontend (not
-just a syntax check): a full JWT flow (register, login, roles,
-protected routes) and the declarative-query route via `TestClient`, a
-real file upload served back by the static mount, an email
-notification actually sent on create/delete (SMTP connection itself
-mocked, everything else real code) and a send failure that never
-breaks the request, and actually building the Reflex component tree
-of every page (chart, form with an upload zone, card).
+(`email` + `notifier:`), calendar (`calendar`, default date-field
+resolution, multilingual aliases, error cases), custom extension
+points — including several tests that **actually import** the
+generated backend and frontend (not just a syntax check): a full JWT
+flow (register, login, roles, protected routes) and the
+declarative-query route via `TestClient`, a real file upload served
+back by the static mount, an email notification actually sent on
+create/delete (SMTP connection itself mocked, everything else real
+code) and a send failure that never breaks the request, and actually
+building the Reflex component tree of every page (chart, calendar with
+its server-computed day grid, form with an upload zone, card).
 
 ### Known MVP limitations
 
@@ -943,9 +1022,12 @@ of every page (chart, form with an upload zone, card).
   bilingual text (subject + record id) — no HTML template, attachment,
   or per-record dynamic recipient in this MVP; for custom content,
   `routers_custom/`.
-- No interactive calendar, no multilingual site content or UI text at
-  runtime yet (site language fixed by `app { language: ... }`) —
-  planned but not yet delivered phases.
+- The `calendar` block is a read-only monthly view (no drag-and-drop
+  event creation/moving directly on the grid, no week/day view); for
+  richer interaction, `frontend/<app>/custom.py`.
+- No multilingual site content or UI text at runtime yet (site language
+  fixed by `app { language: ... }`) — planned but not yet delivered
+  phase.
 - Not yet included: NOVA Studio (dedicated IDE), Marketplace, NOVA
   Cloud, NOVA AI — this repo covers the compiler (roadmap Phase 1/2).
 

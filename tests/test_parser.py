@@ -494,3 +494,95 @@ def test_notifier_without_email_block_raises_syntax_error():
     """
     with pytest.raises(NovaSyntaxError):
         parse_source(src)
+
+
+def test_calendar_block_parses_explicit_date_and_title_fields():
+    src = """
+    entity Event {
+        field title: string required
+        field starts_at: datetime required
+        field location: string
+    }
+    calendar EventCal sur Event {
+      champ_date: starts_at
+      champ_titre: title
+    }
+    """
+    program = parse_source(src)
+    cal = program.calendars[0]
+    assert cal.name == "EventCal"
+    assert cal.entity == "Event"
+    assert cal.date_field == "starts_at"
+    assert cal.title_field == "title"
+
+
+def test_calendar_block_defaults_date_field_to_first_date_or_datetime_field():
+    src = """
+    entity Event {
+        field title: string required
+        field starts_at: datetime required
+    }
+    calendar EventCal sur Event { }
+    """
+    program = parse_source(src)
+    cal = program.calendars[0]
+    assert cal.date_field == "starts_at"
+    assert cal.title_field is None
+
+
+def test_calendar_keyword_and_prop_aliases_recognize_all_six_languages():
+    # Mot-clé du bloc (calendar/calendrier/calendario/calendário/kalender)
+    # et alias de propriétés (champ_date/date_field/campo_fecha/datumsfeld/
+    # campo_data, champ_titre/title_field/campo_titulo/titelfeld/
+    # campo_titolo) dans les 6 langues.
+    entity_src = "entity Event { field title: string field starts_at: datetime }\n"
+    sources = {
+        "en": entity_src + "calendar C sur Event { date_field: starts_at title_field: title }",
+        "fr": entity_src + "calendrier C sur Event { champ_date: starts_at champ_titre: title }",
+        "es": entity_src + "calendario C sur Event { campo_fecha: starts_at campo_titulo: title }",
+        "de": entity_src + "kalender C sur Event { datumsfeld: starts_at titelfeld: title }",
+        "it": entity_src + "calendario C sur Event { campo_data: starts_at campo_titolo: title }",
+        "pt": entity_src + "calendário C sur Event { campo_data: starts_at campo_titulo: title }",
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        assert len(program.calendars) == 1, lang
+        cal = program.calendars[0]
+        assert cal.date_field == "starts_at", lang
+        assert cal.title_field == "title", lang
+
+
+def test_calendar_sur_unknown_entity_raises_syntax_error():
+    src = """
+    entity Event { field starts_at: date }
+    calendar Bad sur Inconnu { }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_calendar_entity_without_any_date_field_raises_syntax_error():
+    src = """
+    entity Event { field title: string }
+    calendar Bad sur Event { }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_calendar_explicit_date_field_not_a_date_type_raises_syntax_error():
+    src = """
+    entity Event { field title: string field starts_at: datetime }
+    calendar Bad sur Event { champ_date: title }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_calendar_explicit_title_field_unknown_raises_syntax_error():
+    src = """
+    entity Event { field starts_at: datetime }
+    calendar Bad sur Event { champ_titre: inconnu }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)

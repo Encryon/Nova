@@ -14,6 +14,7 @@ from .ast_nodes import (
     Api,
     App,
     Auth,
+    Calendar,
     Chart,
     Email,
     Entity,
@@ -292,6 +293,28 @@ class _NovaTransformer(Transformer):
                 email.tls = bool(val) if isinstance(val, bool) else str(val) not in ("0", "false", "non", "no")
         return email
 
+    # ---- calendar ----------------------------------------------------------
+    def calendar_value(self, tok):
+        # Non-terminal dédié (STRING | NAME) plutôt que le `value` générique —
+        # même raison que `chart_value`/`email_value` (voir grammar/nova.lark).
+        text = str(tok)
+        return kw.strip_quotes(text) if text.startswith('"') else text
+
+    def calendar_prop(self, key_tok, value):
+        # Comme `chart_prop`/`email_prop` : clé NAME libre résolue via un
+        # dict Python (kw.CALENDAR_PROP_ALIASES).
+        key = kw.CALENDAR_PROP_ALIASES.get(str(key_tok), str(key_tok))
+        return (key, value)
+
+    def calendar_decl(self, _kw_tok, name_tok, _sur_tok, entity_tok, *props):
+        cal = Calendar(name=str(name_tok), entity=str(entity_tok))
+        for key, val in props:
+            if key == "date_field":
+                cal.date_field = str(val)
+            elif key == "title_field":
+                cal.title_field = str(val)
+        return cal
+
     # ---- programme -----------------------------------------------------
     def statement(self, stmt):
         return stmt
@@ -315,6 +338,8 @@ class _NovaTransformer(Transformer):
                 program.charts.append(s)
             elif isinstance(s, Email):
                 program.email = s
+            elif isinstance(s, Calendar):
+                program.calendars.append(s)
         return program
 
 
@@ -335,6 +360,7 @@ def parse_source(source: str) -> NovaProgram:
     program = _NovaTransformer().transform(tree)
     _validate_charts(program)
     _validate_notifiers(program)
+    _validate_calendars(program)
     return program
 
 
@@ -368,6 +394,48 @@ def _validate_notifiers(program: NovaProgram) -> None:
             f"api '{offending.entity}': 'notifier:' nécessite un bloc "
             f"'email {{ ... }}' déclaré dans le projet (configuration SMTP)."
         )
+
+
+def _validate_calendars(program: NovaProgram) -> None:
+    """`calendar <Nom> sur <Entite> { ... }` : l'entité doit exister ; le
+    champ date (explicite via `champ_date`/`date_field`, ou déduit sinon)
+    doit être un champ date/datetime réel de l'entité ; le champ titre
+    (`champ_titre`/`title_field`), s'il est précisé, doit exister sur
+    l'entité. Comme `_validate_charts`/`_validate_notifiers`, on préfère
+    échouer à la compilation plutôt que de générer une page calendrier dont
+    le champ date n'existe pas (KeyError/AttributeError silencieux au
+    runtime)."""
+    known_entities = {e.name: e for e in program.entities}
+    for cal in program.calendars:
+        entity = known_entities.get(cal.entity)
+        if entity is None:
+            raise NovaSyntaxError(
+                f"calendar '{cal.name}': l'entité '{cal.entity}' (après 'sur') "
+                f"n'est pas déclarée."
+            )
+        date_fields = [f.name for f in entity.fields if f.type in ("date", "datetime")]
+        if cal.date_field is None:
+            if not date_fields:
+                raise NovaSyntaxError(
+                    f"calendar '{cal.name}': l'entité '{cal.entity}' n'a aucun "
+                    f"champ 'date'/'datetime' — précisez 'champ_date'/'date_field' "
+                    f"ou ajoutez un tel champ à l'entité."
+                )
+            cal.date_field = date_fields[0]
+        elif cal.date_field not in date_fields:
+            raise NovaSyntaxError(
+                f"calendar '{cal.name}': le champ '{cal.date_field}' "
+                f"('champ_date'/'date_field') n'est pas un champ date/datetime "
+                f"de l'entité '{cal.entity}'."
+            )
+        if cal.title_field is not None:
+            known_fields = {f.name for f in entity.fields}
+            if cal.title_field not in known_fields:
+                raise NovaSyntaxError(
+                    f"calendar '{cal.name}': le champ '{cal.title_field}' "
+                    f"('champ_titre'/'title_field') n'existe pas sur l'entité "
+                    f"'{cal.entity}'."
+                )
 
 
 def parse_file(path: str | Path) -> NovaProgram:

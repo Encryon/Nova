@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import textwrap
 
-from ..ast_nodes import Chart, NovaProgram, Page
+from ..ast_nodes import Calendar, Chart, NovaProgram, Page
 from ..keywords import STYLE_ALIASES, STYLE_CLASS_KEYS
 from .utils import to_ascii_identifier, to_pascal_case, to_snake_case, pluralize
 
@@ -213,6 +213,169 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
     view_code = (
         f"def {to_snake_case(chart.name)}_chart_page() -> rx.Component:\n"
         + _wrap_page_body(inner, f"{state_cls}.load_rows", "900px")
+    )
+    return state_code, view_code
+
+
+# ------------------------------------------------------------- calendar ---
+
+_WEEKDAY_LABELS = ["Lun/Mon", "Mar/Tue", "Mer/Wed", "Jeu/Thu", "Ven/Fri", "Sam/Sat", "Dim/Sun"]
+
+
+def _calendar_state_class_name(cal: Calendar) -> str:
+    return f"{to_pascal_case(cal.name)}CalendarState"
+
+
+def _calendar_route(cal: Calendar) -> str:
+    slug = to_snake_case(to_ascii_identifier(cal.name)).replace("_", "-")
+    return f"/calendriers/{slug}" if slug else "/calendriers"
+
+
+def _calendar_data_source(program: NovaProgram, cal: Calendar, has_auth: bool) -> tuple[str, bool]:
+    """Résout `calendar ... sur <Entite>` en (chemin_url_backend, protege) —
+    toujours une Entity ici (`parser._validate_calendars` le garantit déjà),
+    même logique d'héritage de la protection `api <Entity> { proteger: ... }`
+    que `_chart_data_source`."""
+    url_path = to_snake_case(pluralize(to_ascii_identifier(cal.entity))) + "/"
+    api = _api_for_entity(program, cal.entity)
+    is_protected = bool(has_auth and api and api.protected_role)
+    return url_path, is_protected
+
+
+def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_auth: bool) -> tuple[str, str]:
+    """Retourne (code_du_state, code_de_la_fonction_de_page) pour un bloc
+    `calendar` : un état Reflex qui charge TOUTES les lignes de l'entité
+    (comme une page table) puis les regroupe côté serveur, jour par jour du
+    mois affiché, via `_build_days` (stdlib `calendar.Calendar.
+    monthdatescalendar` + `datetime.date` — aucune dépendance JS
+    supplémentaire, conformément au choix de conception retenu pour cette
+    fonctionnalité). Chaque jour est un dict PLAT (`date`, `day`,
+    `in_month`, `events_text`) plutôt qu'un dict contenant une liste
+    imbriquée d'événements : `rx.foreach` niché sur une valeur `list[str]`
+    à l'intérieur d'un state var `list[dict]` lève `ForeachVarError` (bug
+    réel rencontré et corrigé pendant la conception de ce bloc `calendar`,
+    voir exploration précédente) — d'où `events_text`, les titres des
+    événements du jour déjà joints en une seule chaîne."""
+    state_cls = _calendar_state_class_name(cal)
+    url_path, is_protected = _calendar_data_source(program, cal, has_auth)
+    date_field_snake = to_snake_case(cal.date_field)
+    title_field_snake = to_snake_case(cal.title_field) if cal.title_field else None
+
+    auth_header_lines = []
+    if is_protected:
+        auth_header_lines = [
+            "        auth_state = await self.get_state(AuthState)",
+            '        headers = {"Authorization": f"Bearer {auth_state.token}"} if auth_state.token else {}',
+        ]
+    headers_kwarg = ", headers=headers" if is_protected else ""
+
+    # Sans `champ_titre`/`title_field`, on affiche un simple marqueur "•"
+    # pour signaler qu'un jour a des enregistrements, plutôt que rien.
+    title_expr = f'str(row.get("{title_field_snake}", ""))' if title_field_snake else '"•"'
+
+    state_lines = [
+        f"class {state_cls}(rx.State):",
+        f'    """État Reflex pour le calendrier `{cal.name}` (source : {cal.entity}).'
+        + (' Route protégée : le jeton AuthState est envoyé en en-tête Authorization."""' if is_protected else '"""'),
+        "    rows: list[dict] = []",
+        "    days: list[dict] = []",
+        "    year: int = date.today().year",
+        "    month: int = date.today().month",
+        '    label: str = ""',
+        "    is_loading: bool = False",
+        "",
+        "    async def load_rows(self):",
+        "        self.is_loading = True",
+    ]
+    state_lines += auth_header_lines
+    state_lines += [
+        "        async with httpx.AsyncClient() as client:",
+        f'            resp = await client.get(f"{{BACKEND_URL}}/{url_path}"{headers_kwarg})',
+        "            if resp.status_code == 200:",
+        "                self.rows = resp.json()",
+        "        self.is_loading = False",
+        "        self._build_days()",
+        "",
+        "    def _build_days(self):",
+        '        self.label = f"{self.year}-{self.month:02d}"',
+        "        weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(self.year, self.month)",
+        "        days = []",
+        "        for week in weeks:",
+        "            for d in week:",
+        "                iso = d.isoformat()",
+        '                events_text = ", ".join(',
+        f"                    {title_expr}",
+        "                    for row in self.rows",
+        f'                    if str(row.get("{date_field_snake}", ""))[:10] == iso',
+        "                )",
+        "                days.append({",
+        '                    "date": iso,',
+        '                    "day": d.day,',
+        '                    "in_month": d.month == self.month,',
+        '                    "events_text": events_text,',
+        "                })",
+        "        self.days = days",
+        "",
+        "    def prev_month(self):",
+        "        self.month -= 1",
+        "        if self.month < 1:",
+        "            self.month = 12",
+        "            self.year -= 1",
+        "        self._build_days()",
+        "",
+        "    def next_month(self):",
+        "        self.month += 1",
+        "        if self.month > 12:",
+        "            self.month = 1",
+        "            self.year += 1",
+        "        self._build_days()",
+        "",
+    ]
+    state_code = "\n".join(state_lines) + "\n"
+
+    weekday_header = ",\n        ".join(
+        f'rx.text("{label}", size="2", weight="bold", align="center")' for label in _WEEKDAY_LABELS
+    )
+    day_cell = (
+        "rx.box(\n"
+        '            rx.text(day["day"], size="2", weight="bold"),\n'
+        '            rx.cond(day["events_text"] != "", rx.text(day["events_text"], size="1", color_scheme="gray")),\n'
+        '            opacity=rx.cond(day["in_month"], "1", "0.35"),\n'
+        '            padding="0.5em",\n'
+        '            border="1px solid var(--gray-5)",\n'
+        '            min_height="80px",\n'
+        '            width="100%",\n'
+        "        )"
+    )
+    inner = (
+        "rx.vstack(\n"
+        f'    rx.heading("{cal.name}", size="7"),\n'
+        "    rx.hstack(\n"
+        f'        rx.button("<", on_click={state_cls}.prev_month, size="2", variant="soft"),\n'
+        f'        rx.heading({state_cls}.label, size="4"),\n'
+        f'        rx.button(">", on_click={state_cls}.next_month, size="2", variant="soft"),\n'
+        '        spacing="3",\n'
+        '        align="center",\n'
+        "    ),\n"
+        "    rx.grid(\n"
+        f"        {weekday_header},\n"
+        '        columns="7",\n'
+        '        spacing="1",\n'
+        '        width="100%",\n'
+        "    ),\n"
+        "    rx.grid(\n"
+        f"        rx.foreach({state_cls}.days, lambda day: {day_cell}),\n"
+        '        columns="7",\n'
+        '        spacing="1",\n'
+        '        width="100%",\n'
+        "    ),\n"
+        '    spacing="4",\n'
+        '    width="100%",\n'
+        ")"
+    )
+    view_code = (
+        f"def {to_snake_case(cal.name)}_calendar_page() -> rx.Component:\n"
+        + _wrap_page_body(inner, f"{state_cls}.load_rows", "1000px")
     )
     return state_code, view_code
 
@@ -472,6 +635,13 @@ def _generate_navbar(program: NovaProgram, has_auth: bool) -> str:
     )
     if chart_links:
         links = f"{links}\n{chart_links}" if links else chart_links
+    calendar_links = "\n".join(
+        f'        rx.link("{c.name}", href="{_calendar_route(c)}", size="3", weight="medium", '
+        f'color_scheme="gray", high_contrast=True),'
+        for c in program.calendars
+    )
+    if calendar_links:
+        links = f"{links}\n{calendar_links}" if links else calendar_links
     auth_links = ""
     if has_auth:
         auth_links = (
@@ -739,6 +909,14 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         "from __future__ import annotations",
         "",
         "import os",
+    ]
+    if program.calendars:
+        # Grille de mois calculée côté serveur avec la seule stdlib
+        # (`calendar.Calendar.monthdatescalendar` + `datetime.date`) — pas
+        # de dépendance JS supplémentaire pour le bloc `calendar`.
+        lines.append("import calendar")
+        lines.append("from datetime import date")
+    lines += [
         "",
         "import httpx",
         "import reflex as rx",
@@ -754,7 +932,7 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         "",
     ]
 
-    if program.pages or program.charts or has_auth:
+    if program.pages or program.charts or program.calendars or has_auth:
         lines.append(_generate_navbar(program, has_auth))
         lines.append("")
 
@@ -780,6 +958,14 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         lines.append(view_code)
         lines.append("")
         page_fns.append((to_snake_case(chart.name) + "_chart_page", _chart_route(chart), chart.title or chart.name))
+
+    for cal in program.calendars:
+        state_code, view_code = _generate_calendar_state_and_view(cal, program, has_auth)
+        lines.append(state_code)
+        lines.append("")
+        lines.append(view_code)
+        lines.append("")
+        page_fns.append((to_snake_case(cal.name) + "_calendar_page", _calendar_route(cal), cal.name))
 
     theme_kwargs = 'appearance="light", accent_color="violet", radius="large", scaling="100%"'
     app_kwargs = f"theme=rx.theme({theme_kwargs})"
