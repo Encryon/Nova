@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NOVA — Business-intent framework</title>
+<meta name="description" content="NOVA: a bilingual (FR/EN) business-intent DSL that compiles to FastAPI, Reflex, Docker and Kubernetes. Fair-source (BSL 1.1 → Apache 2.0).">
+<link rel="icon" href="logo.png">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+  :root{
+    --paper:#faf9fc;
+    --paper-raised:#ffffff;
+    --ink:#18142a;
+    --ink-soft:#544e6b;
+    --line:#e1dcef;
+    --line-soft:#ece8f7;
+    --accent:#6e4bf0;
+    --accent-ink:#5636d1;
+    --accent-soft:#efe9ff;
+    --ok:#1f8a5c;
+    --ok-soft:#e6f5ee;
+    --warn:#a8630f;
+    --warn-soft:#fbf0df;
+    --night:#0a0716;
+    --night-raised:#151029;
+    --night-line:#2a2348;
+    --shadow:0 1px 2px rgba(24,20,42,.04), 0 8px 24px -12px rgba(24,20,42,.12);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size:16px;
+    line-height:1.6;
+  }
+  h1,h2,h3,h4{
+    font-family:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-weight:700;
+    text-wrap:balance;
+    letter-spacing:-0.01em;
+    margin:0;
+  }
+  a{color:var(--accent-ink);}
+  p{margin:0;}
+  code, pre, .mono{font-family:"IBM Plex Mono", ui-monospace, monospace;}
+  img{max-width:100%;}
+
+  .wrap{max-width:1080px; margin:0 auto; padding:0 clamp(20px,4vw,40px);}
+
+  /* ---------- lang toggle ---------- */
+  .lang-toggle{
+    position:fixed;
+    top:18px;
+    right:18px;
+    z-index:50;
+    display:inline-flex;
+    background:var(--night-raised);
+    border:1px solid var(--night-line);
+    border-radius:999px;
+    padding:3px;
+    box-shadow:var(--shadow);
+  }
+  .lang-toggle button{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+    font-weight:600;
+    letter-spacing:.04em;
+    border:none;
+    background:transparent;
+    color:#a89fd6;
+    padding:6px 13px;
+    border-radius:999px;
+    cursor:pointer;
+  }
+  .lang-toggle button.active{background:var(--accent); color:#fff;}
+  [data-lang-block]{display:none;}
+  [data-lang-block].active{display:block;}
+  span[data-lang-block]{display:none;}
+  span[data-lang-block].active{display:inline;}
+
+  /* ---------- hero ---------- */
+  .hero{
+    background:radial-gradient(1200px 600px at 50% -10%, #211a44 0%, var(--night) 55%);
+    color:#f1edff;
+    padding:72px 0 84px;
+    text-align:center;
+  }
+  .hero img.logo{width:150px; margin-bottom:8px;}
+  .hero .eyebrow{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12.5px;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+    color:#b6a6ff;
+    margin-bottom:14px;
+  }
+  .hero h1{
+    font-size:clamp(28px,4.4vw,42px);
+    color:#fff;
+    max-width:680px;
+    margin:0 auto 18px;
+  }
+  .hero .tagline{
+    font-size:17px;
+    color:#c9c1ec;
+    max-width:56ch;
+    margin:0 auto 34px;
+  }
+  .hero .cta-row{
+    display:flex;
+    gap:12px;
+    justify-content:center;
+    flex-wrap:wrap;
+    margin-bottom:30px;
+  }
+  .btn{
+    font-family:"IBM Plex Sans",sans-serif;
+    font-size:14.5px;
+    font-weight:600;
+    text-decoration:none;
+    padding:11px 22px;
+    border-radius:9px;
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+  }
+  .btn.primary{background:var(--accent); color:#fff;}
+  .btn.ghost{background:rgba(255,255,255,.06); color:#f1edff; border:1px solid rgba(255,255,255,.18);}
+  .hero .badge-row{display:flex; gap:8px; flex-wrap:wrap; justify-content:center;}
+  .badge{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:11px;
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:999px;
+    padding:4px 12px;
+    color:#c9c1ec;
+  }
+
+  /* ---------- sections ---------- */
+  section{padding:64px 0;}
+  section.alt{background:var(--paper-raised); border-top:1px solid var(--line); border-bottom:1px solid var(--line);}
+  .section-head{text-align:center; max-width:640px; margin:0 auto 40px;}
+  .section-head .eyebrow{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+    letter-spacing:.09em;
+    text-transform:uppercase;
+    color:var(--accent-ink);
+    margin-bottom:8px;
+  }
+  .section-head h2{font-size:clamp(24px,3.4vw,32px); margin-bottom:12px;}
+  .section-head p{color:var(--ink-soft); font-size:15.5px;}
+
+  /* ---------- feature grid ---------- */
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px;}
+  .card{
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:22px 20px;
+    background:var(--paper-raised);
+    box-shadow:var(--shadow);
+  }
+  .card .icon{
+    width:36px; height:36px;
+    border-radius:9px;
+    background:var(--accent-soft);
+    color:var(--accent-ink);
+    display:flex; align-items:center; justify-content:center;
+    font-family:"IBM Plex Mono",monospace;
+    font-weight:700;
+    margin-bottom:14px;
+  }
+  .card h3{font-size:16px; margin-bottom:8px;}
+  .card p{font-size:14px; color:var(--ink-soft);}
+
+  /* ---------- pipeline ---------- */
+  .pipeline{margin:8px auto 0; max-width:820px;}
+  .pipeline svg{width:100%; height:auto; display:block;}
+  .pipeline text{font-family:"IBM Plex Mono",monospace;}
+
+  /* ---------- code demo ---------- */
+  .demo{display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:start;}
+  @media (max-width:760px){.demo{grid-template-columns:1fr;}}
+  .code-block{
+    border-radius:12px;
+    overflow:hidden;
+    box-shadow:var(--shadow);
+    border:1px solid var(--night-line);
+  }
+  .code-tab{
+    background:#1a1533;
+    color:#a89fd6;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:11.5px;
+    letter-spacing:.03em;
+    padding:8px 14px;
+    display:flex; align-items:center; gap:8px;
+  }
+  .code-tab .dot{width:7px;height:7px;border-radius:50%;background:var(--accent); opacity:.7;}
+  pre{
+    margin:0;
+    background:var(--night);
+    color:#e9e4ff;
+    padding:18px 20px;
+    overflow-x:auto;
+    font-size:13px;
+    line-height:1.65;
+  }
+  pre code{font-family:"IBM Plex Mono",monospace;}
+  .tok-kw{color:#c9b6ff;}
+  .tok-str{color:#8fe0c2;}
+  .tok-com{color:#7d7599;}
+  .demo-side h3{font-size:17px; margin-bottom:10px;}
+  .demo-side p{font-size:14.5px; color:var(--ink-soft); margin-bottom:14px;}
+  .demo-side ul{margin:0; padding-left:1.15em; font-size:14px; color:var(--ink-soft);}
+  .demo-side li{margin:6px 0;}
+
+  /* ---------- keyword pairs ---------- */
+  .kw-row{display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:8px;}
+  .kw-pair{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12.5px;
+    background:var(--paper-raised);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:5px 11px;
+    color:var(--ink-soft);
+  }
+  .kw-pair b{color:var(--accent-ink); font-weight:600;}
+
+  /* ---------- license ---------- */
+  .license-card{
+    background:var(--night);
+    color:#e9e4ff;
+    border-radius:16px;
+    padding:36px clamp(20px,4vw,44px);
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:28px;
+  }
+  @media (max-width:760px){.license-card{grid-template-columns:1fr;}}
+  .license-card h2{color:#fff; font-size:23px; margin-bottom:10px;}
+  .license-card .timeline{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+    color:#b6a6ff;
+    margin-bottom:18px;
+  }
+  .license-card p{color:#c9c1ec; font-size:14.5px; margin:0 0 12px;}
+  .license-card ul{margin:0; padding-left:1.2em; color:#c9c1ec; font-size:14.5px;}
+  .license-card li{margin:6px 0;}
+  .license-card a{color:#c3b1ff;}
+
+  /* ---------- footer ---------- */
+  footer{
+    padding:36px 0 48px;
+    text-align:center;
+    color:var(--ink-soft);
+    font-size:13px;
+  }
+  footer a{color:var(--accent-ink); text-decoration:none;}
+  footer .foot-links{display:flex; gap:18px; justify-content:center; flex-wrap:wrap; margin-bottom:14px; font-size:13.5px;}
+</style>
+</head>
+<body>
+
+<div class="lang-toggle">
+  <button data-lang-btn="fr" class="active">FR</button>
+  <button data-lang-btn="en">EN</button>
+</div>
+
+<header class="hero">
+  <div class="wrap">
+    <img class="logo" src="logo.png" alt="NOVA">
+
+    <p class="eyebrow" data-lang-block="fr">Compilateur d'intention métier</p>
+    <p class="eyebrow" data-lang-block="en">Business-intent compiler</p>
+
+    <h1 data-lang-block="fr">Décrivez votre métier. NOVA génère l'application.</h1>
+    <h1 data-lang-block="en">Describe your business. NOVA generates the app.</h1>
+
+    <p class="tagline" data-lang-block="fr">Un DSL bilingue français/anglais qui compile entités, API et pages vers une API FastAPI, une UI Reflex, des images Docker et des manifests Kubernetes/Helm — le tout depuis un seul fichier texte.</p>
+    <p class="tagline" data-lang-block="en">A bilingual French/English DSL that compiles entities, APIs and pages into a FastAPI backend, a Reflex UI, Docker images and Kubernetes/Helm manifests — all from a single text file.</p>
+
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/Encryon/Nova" target="_blank" rel="noopener">
+        <span data-lang-block="fr">Voir sur GitHub</span>
+        <span data-lang-block="en">View on GitHub</span>
+      </a>
+      <a class="btn ghost" href="https://github.com/Encryon/Nova#d%C3%A9marrage-rapide--quickstart" target="_blank" rel="noopener">
+        <span data-lang-block="fr">Démarrage rapide</span>
+        <span data-lang-block="en">Quickstart</span>
+      </a>
+      <a class="btn ghost" href="#licence">
+        <span data-lang-block="fr">Licence fair-source</span>
+        <span data-lang-block="en">Fair-source license</span>
+      </a>
+    </div>
+
+    <div class="badge-row">
+      <span class="badge" data-lang-block="fr">Fair-source · BSL 1.1 → Apache 2.0</span>
+      <span class="badge" data-lang-block="en">Fair-source · BSL 1.1 → Apache 2.0</span>
+      <span class="badge">Python 3.11+</span>
+      <span class="badge" data-lang-block="fr">22 tests</span>
+      <span class="badge" data-lang-block="en">22 tests passing</span>
+      <span class="badge">FastAPI · Reflex · Docker · K8s</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow" data-lang-block="fr">Comment ça marche</p>
+      <p class="eyebrow" data-lang-block="en">How it works</p>
+      <h2 data-lang-block="fr">Un seul fichier source, quatre cibles générées</h2>
+      <h2 data-lang-block="en">One source file, four generated targets</h2>
+      <p data-lang-block="fr">Chaque mot-clé du langage existe en français et en anglais et compile vers exactement le même arbre syntaxique — un même fichier peut même mélanger les deux.</p>
+      <p data-lang-block="en">Every keyword exists in both French and English and compiles to the exact same syntax tree — a single file can even mix both.</p>
+    </div>
+
+    <div class="pipeline">
+      <svg viewBox="0 0 720 108" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#a89fb0"></path>
+          </marker>
+        </defs>
+        <g font-size="12" fill="var(--ink)">
+          <rect x="4" y="30" width="118" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+          <text x="63" y="49" text-anchor="middle" fill="var(--accent-ink)" font-weight="600">app.nova</text>
+          <text x="63" y="65" text-anchor="middle" fill="var(--ink-soft)" font-size="10.5">FR / EN</text>
+
+          <line x1="126" y1="54" x2="160" y2="54" stroke="#a89fb0" stroke-width="1.4" marker-end="url(#arrow)"></line>
+
+          <rect x="164" y="30" width="108" height="48" rx="9" fill="var(--paper-raised)" stroke="var(--line)"></rect>
+          <text x="218" y="49" text-anchor="middle" font-weight="600">Grammaire</text>
+          <text x="218" y="65" text-anchor="middle" fill="var(--ink-soft)" font-size="10.5">Lark (LALR)</text>
+
+          <line x1="276" y1="54" x2="310" y2="54" stroke="#a89fb0" stroke-width="1.4" marker-end="url(#arrow)"></line>
+
+          <rect x="314" y="30" width="108" height="48" rx="9" fill="var(--paper-raised)" stroke="var(--line)"></rect>
+          <text x="368" y="49" text-anchor="middle" font-weight="600">AST</text>
+          <text x="368" y="65" text-anchor="middle" fill="var(--ink-soft)" font-size="10.5">canonique</text>
+
+          <line x1="426" y1="54" x2="460" y2="54" stroke="#a89fb0" stroke-width="1.4" marker-end="url(#arrow)"></line>
+
+          <rect x="464" y="4" width="122" height="26" rx="7" fill="var(--paper-raised)" stroke="var(--line)"></rect>
+          <text x="525" y="21" text-anchor="middle" font-size="11">FastAPI</text>
+          <rect x="464" y="34" width="122" height="26" rx="7" fill="var(--paper-raised)" stroke="var(--line)"></rect>
+          <text x="525" y="51" text-anchor="middle" font-size="11">Reflex UI</text>
+          <rect x="464" y="64" width="122" height="26" rx="7" fill="var(--paper-raised)" stroke="var(--line)"></rect>
+          <text x="525" y="81" text-anchor="middle" font-size="11">Docker</text>
+
+          <line x1="590" y1="17" x2="618" y2="45" stroke="#a89fb0" stroke-width="1.2" marker-end="url(#arrow)"></line>
+          <line x1="590" y1="47" x2="618" y2="47" stroke="#a89fb0" stroke-width="1.2" marker-end="url(#arrow)"></line>
+          <line x1="590" y1="77" x2="618" y2="49" stroke="#a89fb0" stroke-width="1.2" marker-end="url(#arrow)"></line>
+
+          <rect x="622" y="30" width="96" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+          <text x="670" y="49" text-anchor="middle" fill="var(--accent-ink)" font-weight="600">Helm</text>
+          <text x="670" y="65" text-anchor="middle" fill="var(--ink-soft)" font-size="10.5">K8s + Traefik</text>
+        </g>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow" data-lang-block="fr">Ce que vous obtenez</p>
+      <p class="eyebrow" data-lang-block="en">What you get</p>
+      <h2 data-lang-block="fr">Pas seulement du CRUD</h2>
+      <h2 data-lang-block="en">Not just CRUD</h2>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="icon">FR/EN</div>
+        <h3 data-lang-block="fr">DSL bilingue natif</h3>
+        <h3 data-lang-block="en">Native bilingual DSL</h3>
+        <p data-lang-block="fr">Chaque bloc et chaque type existe en français et en anglais, et compile vers le même AST canonique — même dans un fichier mixte.</p>
+        <p data-lang-block="en">Every block and type exists in both French and English and compiles to the same canonical AST — even within a single mixed file.</p>
+      </div>
+      <div class="card">
+        <div class="icon">4×</div>
+        <h3 data-lang-block="fr">Quatre cibles de génération</h3>
+        <h3 data-lang-block="en">Four codegen targets</h3>
+        <p data-lang-block="fr">API FastAPI + SQLModel, UI Reflex modernisée (thème Radix, cartes, navbar), Docker, et un chart Helm/Kubernetes.</p>
+        <p data-lang-block="en">FastAPI + SQLModel API, a modern Reflex UI (Radix theme, cards, navbar), Docker, and a Helm/Kubernetes chart.</p>
+      </div>
+      <div class="card">
+        <div class="icon">.*</div>
+        <h3 data-lang-block="fr">Validation par regex</h3>
+        <h3 data-lang-block="en">Regex field validation</h3>
+        <p data-lang-block="fr">Un modificateur <code>motif</code>/<code>pattern</code> génère une contrainte Pydantic sur le modèle et les schémas Create/Update — 422 automatique.</p>
+        <p data-lang-block="en">A <code>pattern</code>/<code>motif</code> modifier generates a Pydantic constraint on the model and Create/Update schemas — automatic 422s.</p>
+      </div>
+      <div class="card">
+        <div class="icon">{ }</div>
+        <h3 data-lang-block="fr">Points d'extension "custom"</h3>
+        <h3 data-lang-block="en">"Custom" extension points</h3>
+        <p data-lang-block="fr"><code>routers_custom/</code> et <code>custom.py</code> : du code métier écrit à la main qui survit à chaque recompilation.</p>
+        <p data-lang-block="en"><code>routers_custom/</code> and <code>custom.py</code>: hand-written business logic that survives every recompile.</p>
+      </div>
+      <div class="card">
+        <div class="icon">▣</div>
+        <h3 data-lang-block="fr">Prêt pour le cloud</h3>
+        <h3 data-lang-block="en">Cloud-native by default</h3>
+        <p data-lang-block="fr">Dockerfiles et chart Helm générés dès le premier <code>nova compile</code>, sans configuration manuelle.</p>
+        <p data-lang-block="en">Dockerfiles and a Helm chart are generated from the very first <code>nova compile</code>, with no manual setup.</p>
+      </div>
+      <div class="card">
+        <div class="icon">✓</div>
+        <h3 data-lang-block="fr">Testé de bout en bout</h3>
+        <h3 data-lang-block="en">Tested end to end</h3>
+        <p data-lang-block="fr">22 tests, dont un qui importe réellement le backend généré et lui envoie une vraie requête HTTP.</p>
+        <p data-lang-block="en">22 tests, including one that actually imports the generated backend and sends it a real HTTP request.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow" data-lang-block="fr">En pratique</p>
+      <p class="eyebrow" data-lang-block="en">In practice</p>
+      <h2 data-lang-block="fr">De l'intention au code, en quelques lignes</h2>
+      <h2 data-lang-block="en">From intent to code, in a few lines</h2>
+    </div>
+
+    <div class="demo">
+      <div class="code-block">
+        <div class="code-tab"><span class="dot"></span>boutique.nova</div>
+        <pre><code><span class="tok-kw">entité</span> Produit {
+  champ nom: chaine requis
+  champ prix: decimal requis
+  champ email_contact: chaine motif = <span class="tok-str">"^[^@]+@[^@]+$"</span>
+}
+
+<span class="tok-kw">api</span> Produit {
+  liste
+  créer
+  modifier
+  supprimer
+}
+
+<span class="tok-kw">page</span> Catalogue {
+  afficher Produit comme table titre <span class="tok-str">"Catalogue"</span>
+}</code></pre>
+      </div>
+      <div class="demo-side">
+        <h3 data-lang-block="fr">Ce que ce fichier génère</h3>
+        <h3 data-lang-block="en">What this file generates</h3>
+        <ul>
+          <li data-lang-block="fr">Un modèle SQLModel <code>Produit</code> avec validation regex sur <code>email_contact</code></li>
+          <li data-lang-block="en">A SQLModel <code>Produit</code> model with regex validation on <code>email_contact</code></li>
+          <li data-lang-block="fr">Des routes CRUD FastAPI complètes, documentées dans Swagger</li>
+          <li data-lang-block="en">Full CRUD FastAPI routes, documented in Swagger</li>
+          <li data-lang-block="fr">Une page Reflex avec tableau, navbar et lien vers un formulaire de création</li>
+          <li data-lang-block="en">A Reflex page with a table, navbar, and a link to a creation form</li>
+          <li data-lang-block="fr">Un Dockerfile par service et un chart Helm prêt à adapter</li>
+          <li data-lang-block="en">A Dockerfile per service and a Helm chart ready to adapt</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="kw-row">
+      <span class="kw-pair"><b>entité</b> ↔ entity</span>
+      <span class="kw-pair"><b>champ</b> ↔ field</span>
+      <span class="kw-pair"><b>requis</b> ↔ required</span>
+      <span class="kw-pair"><b>motif</b> ↔ pattern</span>
+      <span class="kw-pair"><b>créer</b> ↔ create</span>
+      <span class="kw-pair"><b>afficher</b> ↔ show</span>
+      <span class="kw-pair"><b>appartient_à</b> ↔ belongs_to</span>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="licence">
+  <div class="wrap">
+    <div class="license-card">
+      <div>
+        <p class="eyebrow" data-lang-block="fr" style="color:#b6a6ff;">Licence</p>
+        <p class="eyebrow" data-lang-block="en" style="color:#b6a6ff;">License</p>
+        <h2 data-lang-block="fr">Fair-source, dès aujourd'hui</h2>
+        <h2 data-lang-block="en">Fair-source, starting today</h2>
+        <p class="timeline" data-lang-block="fr">Business Source License 1.1 → bascule vers Apache 2.0 le 2030-09-08</p>
+        <p class="timeline" data-lang-block="en">Business Source License 1.1 → converts to Apache 2.0 on 2030-09-08</p>
+        <p data-lang-block="fr">Le code source de NOVA est ouvert et lisible par tous dès maintenant. Quatre ans après chaque publication, cette version bascule automatiquement sous licence Apache 2.0, totalement permissive.</p>
+        <p data-lang-block="en">NOVA's source code is open and readable by everyone right now. Four years after each release, that version automatically converts to the fully permissive Apache 2.0 license.</p>
+      </div>
+      <div>
+        <ul>
+          <li data-lang-block="fr"><b style="color:#fff">Gratuit</b> pour tout usage non-commercial : projets personnels, formation, évaluation, contributions.</li>
+          <li data-lang-block="en"><b style="color:#fff">Free</b> for any non-commercial use: personal projects, education, evaluation, contributions.</li>
+          <li data-lang-block="fr"><b style="color:#fff">Licence commerciale requise</b> pour un usage en entreprise, dans un produit vendu ou un hébergement — <a href="mailto:contact@enc-soft.com">contact@enc-soft.com</a>.</li>
+          <li data-lang-block="en"><b style="color:#fff">Commercial license required</b> for business use, a sold product, or a hosted offering — <a href="mailto:contact@enc-soft.com">contact@enc-soft.com</a>.</li>
+          <li data-lang-block="fr">Texte complet dans <a href="https://github.com/Encryon/Nova/blob/main/LICENSE.md" target="_blank" rel="noopener">LICENSE.md</a>.</li>
+          <li data-lang-block="en">Full text in <a href="https://github.com/Encryon/Nova/blob/main/LICENSE.md" target="_blank" rel="noopener">LICENSE.md</a>.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-links">
+      <a href="https://github.com/Encryon/Nova" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/Encryon/Nova/blob/main/LICENSE.md" target="_blank" rel="noopener" data-lang-block="fr">Licence</a>
+      <a href="https://github.com/Encryon/Nova/blob/main/LICENSE.md" target="_blank" rel="noopener" data-lang-block="en">License</a>
+      <a href="mailto:contact@enc-soft.com">contact@enc-soft.com</a>
+    </div>
+    <p>© 2026 Encryon (ENC-SOFT).
+      <span data-lang-block="fr">NOVA, le nom et le logo restent la propriété d'Encryon.</span>
+      <span data-lang-block="en">The NOVA name and logo remain the property of Encryon.</span>
+    </p>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var btns = document.querySelectorAll('[data-lang-btn]');
+    function setLang(lang){
+      btns.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-lang-btn') === lang); });
+      document.querySelectorAll('[data-lang-block]').forEach(function(el){
+        el.classList.toggle('active', el.getAttribute('data-lang-block') === lang);
+      });
+      document.documentElement.setAttribute('lang', lang);
+    }
+    btns.forEach(function(b){
+      b.addEventListener('click', function(){ setLang(b.getAttribute('data-lang-btn')); });
+    });
+    setLang('fr');
+  })();
+</script>
+
+</body>
+</html>
