@@ -767,3 +767,189 @@ def test_upload_endpoint_stores_file_and_is_served_by_static_mount(tmp_path):
             del sys.modules[mod_name]
 
 
+# ------------------------------------------------------------------ email ---
+# Bloc `email { smtp: ... }` + `notifier:` sur `api` : notification simple
+# envoyée après create/update/delete, voir codegen/api_fastapi.py.
+
+_EMAIL_NOVA = """
+app Boutique {
+  name: "Boutique"
+}
+
+entity Commande {
+  field client: string required
+  field montant: float
+}
+
+email {
+  host: "smtp.example.com"
+  port: 2525
+  from: "noreply@example.com"
+  to: "ops@example.com"
+}
+
+api Commande {
+  list
+  create
+  update
+  delete
+  notifier: create, delete
+}
+"""
+
+
+def test_email_block_generates_emailer_module_with_smtp_config_and_defaults(tmp_path):
+    program = parse_source(_EMAIL_NOVA)
+    generate_project(program, tmp_path)
+
+    emailer_src = (tmp_path / "backend/app/emailer.py").read_text(encoding="utf-8")
+    assert 'SMTP_HOST = os.environ.get("NOVA_SMTP_HOST", "smtp.example.com")' in emailer_src
+    assert 'SMTP_PORT = int(os.environ.get("NOVA_SMTP_PORT", "2525"))' in emailer_src
+    assert 'SMTP_FROM = os.environ.get("NOVA_SMTP_FROM", "noreply@example.com")' in emailer_src
+    assert 'SMTP_TO = os.environ.get("NOVA_SMTP_TO", "ops@example.com")' in emailer_src
+    # Le mot de passe n'est JAMAIS écrit en dur : uniquement lu depuis l'env,
+    # sans valeur par défaut issue du fichier .nova (voir ast_nodes.Email).
+    assert 'SMTP_PASSWORD = os.environ.get("NOVA_SMTP_PASSWORD", "")' in emailer_src
+
+
+def test_emailer_not_generated_without_email_block(tmp_path):
+    """Régression : un projet sans bloc `email { ... }` (ex. blog.en.nova)
+    ne doit générer ni `emailer.py`, ni référence à `send_email`."""
+    program = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(program, tmp_path)
+    assert not (tmp_path / "backend/app/emailer.py").exists()
+    for router_file in (tmp_path / "backend/app/routers").glob("*.py"):
+        assert "send_email" not in router_file.read_text(encoding="utf-8")
+
+
+def test_notify_stmt_injects_send_email_call_only_for_listed_actions(tmp_path):
+    """`notifier: create, delete` (pas `update`) : seuls les gestionnaires
+    create/delete du routeur généré doivent appeler `send_email`."""
+    program = parse_source(_EMAIL_NOVA)
+    generate_project(program, tmp_path)
+    router_src = (tmp_path / "backend/app/routers/commandes.py").read_text(encoding="utf-8")
+    assert "from ..emailer import send_email" in router_src
+
+    def _function_body(name: str) -> str:
+        marker = f"def {name}("
+        start = router_src.index(marker)
+        try:
+            end = router_src.index("\n\n\n", start)
+        except ValueError:
+            end = len(router_src)  # dernière fonction du fichier
+        return router_src[start:end]
+
+    assert "send_email(" in _function_body("create_commande")
+    assert "send_email(" in _function_body("delete_commande")
+    assert "send_email(" not in _function_body("update_commande")
+
+
+def test_docker_compose_includes_smtp_password_placeholder_only_when_email_block_present(tmp_path):
+    with_email = parse_source(_EMAIL_NOVA)
+    generate_project(with_email, tmp_path / "with_email")
+    compose = (tmp_path / "with_email/docker-compose.yml").read_text(encoding="utf-8")
+    assert 'NOVA_SMTP_PASSWORD: ""' in compose
+
+    without_email = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(without_email, tmp_path / "without_email")
+    compose = (tmp_path / "without_email/docker-compose.yml").read_text(encoding="utf-8")
+    assert "NOVA_SMTP_PASSWORD" not in compose
+
+
+def test_email_notification_sent_on_create_and_delete_real_execution(tmp_path):
+    """Exécute réellement le backend généré (pas seulement `ast.parse`) :
+    la connexion SMTP elle-même est simulée (`unittest.mock.patch` sur
+    `smtplib.SMTP`, pas de vrai serveur mail dans la CI), mais tout le
+    reste — routage FastAPI, construction du message, choix du
+    destinataire/sujet/corps, et le fait qu'aucun email ne parte pour
+    `update` (absent de `notifier:`) — passe par le vrai code généré."""
+    from unittest.mock import MagicMock, patch
+
+    program = parse_source(_EMAIL_NOVA)
+    generate_project(program, tmp_path)
+
+    backend_dir = str(tmp_path / "backend")
+    sys.path.insert(0, backend_dir)
+    old_db_url = os.environ.get("NOVA_DATABASE_URL")
+    os.environ["NOVA_DATABASE_URL"] = f"sqlite:///{tmp_path}/test_email.db"
+    for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[mod_name]
+    try:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        with patch("app.emailer.smtplib.SMTP") as mock_smtp:
+            smtp_instance = MagicMock()
+            mock_smtp.return_value.__enter__.return_value = smtp_instance
+            with TestClient(main.app) as client:
+                created = client.post("/commandes", json={"client": "Alan", "montant": 42.5})
+                assert created.status_code == 201
+                item_id = created.json()["id"]
+
+                updated = client.put(
+                    f"/commandes/{item_id}", json={"client": "Alan", "montant": 99.0}
+                )
+                assert updated.status_code == 200
+
+                deleted = client.delete(f"/commandes/{item_id}")
+                assert deleted.status_code == 204
+
+            # create + delete -> 2 emails ; update n'en déclenche aucun.
+            assert smtp_instance.send_message.call_count == 2
+            sent = [call.args[0] for call in smtp_instance.send_message.call_args_list]
+            assert sent[0]["To"] == "ops@example.com"
+            assert sent[0]["From"] == "noreply@example.com"
+            assert "Nouveau Commande" in sent[0]["Subject"]
+            assert f"#{item_id}" in sent[0].get_content()
+            assert "supprimé" in sent[1]["Subject"]
+    finally:
+        sys.path.remove(backend_dir)
+        if old_db_url is None:
+            os.environ.pop("NOVA_DATABASE_URL", None)
+        else:
+            os.environ["NOVA_DATABASE_URL"] = old_db_url
+        for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+            del sys.modules[mod_name]
+
+
+def test_email_send_failure_never_breaks_the_api_response(tmp_path):
+    """Un serveur SMTP injoignable (ici : port fermé sur localhost) ne doit
+    jamais faire échouer la création qui a déclenché la notification —
+    `send_email` avale et logue l'erreur (voir emailer.py généré).
+
+    Entité `Livraison` distincte de `Commande` (utilisée par le test
+    précédent) : importer deux fois un module qui définit une classe
+    SQLModel du même nom dans le même process pytest fait planter le
+    registre de métadonnées SQLAlchemy — même contrainte déjà documentée
+    pour `nova_users`/`Produit`/`Article` ailleurs dans ce fichier."""
+    program = parse_source(
+        _EMAIL_NOVA.replace("entity Commande {", "entity Livraison {")
+        .replace("api Commande {", "api Livraison {")
+        .replace('host: "smtp.example.com"', 'host: "127.0.0.1"')
+        .replace("port: 2525", "port: 1")
+    )
+    generate_project(program, tmp_path)
+
+    backend_dir = str(tmp_path / "backend")
+    sys.path.insert(0, backend_dir)
+    old_db_url = os.environ.get("NOVA_DATABASE_URL")
+    os.environ["NOVA_DATABASE_URL"] = f"sqlite:///{tmp_path}/test_email_failure.db"
+    for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[mod_name]
+    try:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        with TestClient(main.app) as client:
+            created = client.post("/livraisons", json={"client": "Alan", "montant": 1.0})
+            assert created.status_code == 201
+    finally:
+        sys.path.remove(backend_dir)
+        if old_db_url is None:
+            os.environ.pop("NOVA_DATABASE_URL", None)
+        else:
+            os.environ["NOVA_DATABASE_URL"] = old_db_url
+        for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+            del sys.modules[mod_name]
+
+

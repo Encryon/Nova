@@ -53,6 +53,7 @@ class Api:
     entity: str
     actions: list[str] = field(default_factory=list)  # subset of list/create/update/delete/get
     protected_role: Optional[str] = None  # `proteger: <role>` — None = API publique
+    notify_actions: list[str] = field(default_factory=list)  # subset of create/update/delete (`notifier:`)
 
 
 @dataclass
@@ -118,6 +119,22 @@ class Chart:
 
 
 @dataclass
+class Email:
+    """Bloc `email { ... }` optionnel : configuration SMTP par défaut pour
+    les notifications déclenchées par `notifier:` sur un bloc `api`. Le mot
+    de passe SMTP n'est JAMAIS porté par cet objet (donc jamais lu depuis le
+    fichier .nova) : toujours fourni au runtime via la variable
+    d'environnement NOVA_SMTP_PASSWORD, comme NOVA_JWT_SECRET pour l'auth
+    (voir codegen/api_fastapi.py::_generate_emailer)."""
+    host: str = "localhost"
+    port: int = 587
+    user: str = ""
+    from_addr: str = ""
+    to_addr: str = ""
+    tls: bool = True
+
+
+@dataclass
 class NovaProgram:
     app: Optional[App] = None
     entities: list[Entity] = field(default_factory=list)
@@ -126,6 +143,7 @@ class NovaProgram:
     auth: Optional[Auth] = None
     queries: list[Query] = field(default_factory=list)
     charts: list[Chart] = field(default_factory=list)
+    email: Optional[Email] = None
 
     def get_entity(self, name: str) -> Optional[Entity]:
         return next((e for e in self.entities if e.name == name), None)

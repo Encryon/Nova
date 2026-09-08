@@ -8,6 +8,7 @@ delete/get, dans n'importe quelle langue à l'origine).
 
 from __future__ import annotations
 
+from ..ast_nodes import Email as _Email
 from ..ast_nodes import Entity, NovaProgram, QueryFilter
 from .utils import PY_TYPE_MAP, pluralize, to_ascii_identifier, to_pascal_case, to_snake_case
 
@@ -157,11 +158,17 @@ def get_session() -> Iterator[Session]:
 '''
 
 
-def _generate_router(entity: Entity, actions: list[str], protected_role: str | None = None) -> str:
+def _generate_router(
+    entity: Entity,
+    actions: list[str],
+    protected_role: str | None = None,
+    notify_actions: list[str] | None = None,
+) -> str:
     cls = _model_class_name(entity)
     table = _table_name(entity)
     var = to_snake_case(entity.name)
     tag = entity.name
+    notify_actions = notify_actions or []
 
     lines = [
         _HEADER,
@@ -175,6 +182,10 @@ def _generate_router(entity: Entity, actions: list[str], protected_role: str | N
     ]
     if protected_role:
         lines.append("from ..auth import require_role")
+    if notify_actions:
+        # `notifier: ...` sur `api {entity.name} { ... }` (nécessite un bloc
+        # `email { ... }` — validé à la compilation, voir parser.py).
+        lines.append("from ..emailer import send_email")
     lines.append("")
     router_kwargs = f'prefix="/{table}", tags=["{tag}"]'
     if protected_role:
@@ -219,6 +230,13 @@ def _generate_router(entity: Entity, actions: list[str], protected_role: str | N
             "    session.add(item)",
             "    session.commit()",
             "    session.refresh(item)",
+        ]
+        if "create" in notify_actions:
+            lines.append(
+                f'    send_email(subject="[NOVA] Nouveau {tag} / New {tag}", '
+                f'body=f"{tag} #{{item.id}} créé / created.")'
+            )
+        lines += [
             "    return item",
             "",
             "",
@@ -237,6 +255,13 @@ def _generate_router(entity: Entity, actions: list[str], protected_role: str | N
             "    session.add(item)",
             "    session.commit()",
             "    session.refresh(item)",
+        ]
+        if "update" in notify_actions:
+            lines.append(
+                f'    send_email(subject="[NOVA] {tag} modifié / updated", '
+                f'body=f"{tag} #{{item.id}} mis à jour / updated.")'
+            )
+        lines += [
             "    return item",
             "",
             "",
@@ -250,8 +275,21 @@ def _generate_router(entity: Entity, actions: list[str], protected_role: str | N
             f"    item = session.get({cls}, item_id)",
             "    if item is None:",
             f'        raise HTTPException(status_code=404, detail="{tag} not found")',
+        ]
+        if "delete" in notify_actions:
+            # L'id est capturé avant `session.delete`/`commit` : l'objet est
+            # expiré après le commit, `item.id` ne serait plus fiable ensuite.
+            lines.append("    deleted_id = item.id")
+        lines += [
             "    session.delete(item)",
             "    session.commit()",
+        ]
+        if "delete" in notify_actions:
+            lines.append(
+                f'    send_email(subject="[NOVA] {tag} supprimé / deleted", '
+                f'body=f"{tag} #{{deleted_id}} supprimé / deleted.")'
+            )
+        lines += [
             "    return None",
             "",
         ]
@@ -546,6 +584,72 @@ def _generate_query_router(program: NovaProgram) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _generate_emailer(program: NovaProgram) -> str:
+    """`backend/app/emailer.py` — généré uniquement si un bloc `email {
+    ... }` est présent (voir `generate_backend`). Les valeurs du bloc
+    servent de valeur par défaut, surchargeables sans recompiler via des
+    variables d'environnement — sauf le mot de passe, jamais porté par
+    `ast_nodes.Email` (voir son docstring), donc toujours vide par défaut
+    ici : NOVA_SMTP_PASSWORD est la seule source possible."""
+    email = program.email or _Email()
+    tls_default = "true" if email.tls else "false"
+    return (
+        _HEADER
+        + f'''
+from __future__ import annotations
+
+import logging
+import os
+import smtplib
+from email.message import EmailMessage
+
+logger = logging.getLogger("nova.email")
+
+# Bloc `email {{ ... }}` du fichier .nova : valeurs par défaut ci-dessous,
+# surchargeables sans recompiler via NOVA_SMTP_HOST / NOVA_SMTP_PORT /
+# NOVA_SMTP_USER / NOVA_SMTP_FROM / NOVA_SMTP_TO / NOVA_SMTP_TLS. Le mot de
+# passe SMTP n'est JAMAIS lu depuis le fichier .nova (aucun secret en clair
+# dans le code source généré) : toujours NOVA_SMTP_PASSWORD, vide par
+# défaut (pas d'authentification SMTP tant qu'elle n'est pas fournie au
+# runtime — même philosophie que NOVA_JWT_SECRET pour l'auth).
+SMTP_HOST = os.environ.get("NOVA_SMTP_HOST", "{email.host}")
+SMTP_PORT = int(os.environ.get("NOVA_SMTP_PORT", "{email.port}"))
+SMTP_USER = os.environ.get("NOVA_SMTP_USER", "{email.user}")
+SMTP_PASSWORD = os.environ.get("NOVA_SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("NOVA_SMTP_FROM", "{email.from_addr}")
+SMTP_TO = os.environ.get("NOVA_SMTP_TO", "{email.to_addr}")
+SMTP_TLS = os.environ.get("NOVA_SMTP_TLS", "{tls_default}").strip().lower() not in ("0", "false", "non", "no")
+
+
+def send_email(subject: str, body: str, to: str | None = None) -> None:
+    """Envoie un email texte simple — notification déclenchée par
+    `notifier:` sur un bloc `api` (voir app/routers/<entite>.py). Toute
+    erreur (serveur SMTP injoignable, identifiants invalides...) est
+    loggée en warning et n'interrompt JAMAIS l'appelant : une notification
+    est un effet de bord, pas une garantie — un souci SMTP ne doit jamais
+    faire échouer une création/modification/suppression d'enregistrement."""
+    recipient = to or SMTP_TO
+    if not recipient:
+        logger.warning("NOVA email: aucun destinataire configuré (NOVA_SMTP_TO), notification ignorée.")
+        return
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM or SMTP_USER or "noreply@nova.local"
+    msg["To"] = recipient
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
+            if SMTP_TLS:
+                smtp.starttls()
+            if SMTP_USER and SMTP_PASSWORD:
+                smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+    except Exception as exc:  # pragma: no cover - dépend d'un serveur SMTP réel
+        logger.warning("NOVA email: envoi échoué (%s) — notification ignorée.", exc)
+'''
+    )
+
+
 def _has_uploads(program: NovaProgram) -> bool:
     """True si au moins un champ `file`/`fichier` ou `image` existe quelque
     part dans le programme — déclenche la génération du routeur d'upload et
@@ -593,6 +697,7 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
     has_auth = program.auth is not None and program.auth.enabled
     has_queries = bool(program.queries)
     has_uploads = _has_uploads(program)
+    has_email = program.email is not None
 
     requirements = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "sqlmodel>=0.0.16"]
     if has_auth:
@@ -618,12 +723,16 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
         files["backend/app/routers/_requetes.py"] = _generate_query_router(program)
     if has_uploads:
         files["backend/app/routers/_uploads.py"] = _UPLOADS_ROUTER_TEMPLATE
+    if has_email:
+        files["backend/app/emailer.py"] = _generate_emailer(program)
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
             continue
         table = _table_name(entity)
-        files[f"backend/app/routers/{table}.py"] = _generate_router(entity, api.actions, api.protected_role)
+        files[f"backend/app/routers/{table}.py"] = _generate_router(
+            entity, api.actions, api.protected_role, api.notify_actions
+        )
     return files
 
 

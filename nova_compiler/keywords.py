@@ -138,6 +138,24 @@ CHART_TYPES = {
 }
 
 
+# ---- bloc `email { ... }` (configuration SMTP) ---------------------------
+# Même philosophie que CHART_PROP_ALIASES ci-dessus : les clés du bloc
+# `email` sont des NAME libres résolues ici plutôt que des mots-clés de
+# grammaire. Volontairement PAS de clé pour le mot de passe : voir le
+# commentaire sur `email_decl` dans grammar/nova.lark et
+# codegen/api_fastapi.py::_generate_emailer — toujours NOVA_SMTP_PASSWORD.
+EMAIL_PROP_ALIASES = {
+    "hote": "host", "hôte": "host", "serveur": "host", "host": "host", "servidor": "host",
+    "port": "port", "puerto": "port", "porta": "port",
+    "utilisateur": "user", "user": "user", "usuario": "user", "benutzer": "user", "utente": "user",
+    "expediteur": "from", "expéditeur": "from", "from": "from",
+    "remitente": "from", "absender": "from", "mittente": "from", "remetente": "from",
+    "destinataire": "to", "to": "to", "destinatario": "to",
+    "empfaenger": "to", "empfänger": "to",
+    "tls": "tls", "ssl": "tls",
+}
+
+
 def strip_quotes(raw: str) -> str:
     """'"Hello"' -> 'Hello'"""
     return raw[1:-1] if raw.startswith('"') and raw.endswith('"') else raw

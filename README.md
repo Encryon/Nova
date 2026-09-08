@@ -10,7 +10,7 @@
 ![Statut](https://img.shields.io/badge/statut-fair--source%20/%20open-6e4bf0)
 ![Version](https://img.shields.io/badge/version-0.3.0-6e4bf0)
 ![Python](https://img.shields.io/badge/python-3.11%2B-6e4bf0)
-![Tests](https://img.shields.io/badge/tests-55%20passed-2f9e6e)
+![Tests](https://img.shields.io/badge/tests-65%20passed-2f9e6e)
 ![Licence](https://img.shields.io/badge/licence-BSL%201.1%20→%20Apache%202.0-a8630f)
 
 [🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Référence des mots-clés (6 langues)](docs/REFERENCE.md) · [Licence](#licence--license)
@@ -376,6 +376,57 @@ téléchargement), la seconde reste l'URL interne Docker utilisée pour
 les appels serveur-à-serveur — les deux diffèrent dès qu'on sort du
 `docker compose up` local.
 
+### Notifications par email (`email` + `notifier:`)
+
+Un bloc `email { ... }` optionnel (une fois par projet) déclare la
+configuration SMTP par défaut ; l'option `notifier:` sur un bloc `api`
+déclenche l'envoi d'un email simple après chaque action listée :
+
+```
+email {
+  hote: "smtp.mailtrap.io"
+  port: 2525
+  expediteur: "noreply@boutique.fr"
+  destinataire: "ops@boutique.fr"
+}
+
+api Produit {
+  creer
+  supprimer
+  notifier: creer, supprimer
+}
+```
+
+Génère `backend/app/emailer.py` (fonction `send_email`, `smtplib` de la
+bibliothèque standard — **aucune dépendance Python supplémentaire**) et
+appelle automatiquement cette fonction à la fin des gestionnaires
+`creer`/`modifier`/`supprimer` listés après `notifier:` dans le routeur
+généré. Comportements à connaître :
+
+- **Le mot de passe SMTP n'est jamais écrit dans le fichier `.nova`** :
+  aucune propriété du bloc `email` ne le porte. Il est fourni au runtime
+  exclusivement via la variable d'environnement `NOVA_SMTP_PASSWORD`
+  (`docker-compose.yml` reçoit une ligne `NOVA_SMTP_PASSWORD: ""` à
+  compléter) — même principe que `NOVA_JWT_SECRET` pour l'authentification.
+  Les autres propriétés (`hote`/`port`/`utilisateur`/`expediteur`/
+  `destinataire`/`tls`) sont surchargeables sans recompiler via
+  `NOVA_SMTP_HOST`/`NOVA_SMTP_PORT`/`NOVA_SMTP_USER`/`NOVA_SMTP_FROM`/
+  `NOVA_SMTP_TO`/`NOVA_SMTP_TLS`.
+- **Un échec d'envoi n'interrompt jamais la requête** : `send_email` capture
+  toute erreur (serveur injoignable, identifiants invalides...) et la
+  logue en `warning` — une création/modification/suppression réussit
+  toujours même si l'email n'est pas parti. Une notification est un
+  effet de bord, pas une garantie.
+- `notifier:` n'accepte que `creer`/`modifier`/`supprimer` (lister/obtenir
+  n'a pas de sens à notifier) et nécessite qu'un bloc `email { ... }`
+  soit déclaré quelque part dans le fichier — sinon `nova check`/`nova
+  compile` refuse de compiler plutôt que de produire un projet dont la
+  notification échouerait silencieusement.
+- Le message envoyé est un texte simple bilingue généré automatiquement
+  (sujet + corps mentionnant l'entité et son id) — pas de template HTML
+  ni de pièce jointe dans ce MVP ; pour un contenu personnalisé, appelez
+  `send_email(subject=..., body=..., to=...)` depuis `routers_custom/`.
+
 ### Aller au-delà du DSL : points d'extension "custom"
 
 Le DSL couvre le CRUD et l'UI simples. Pour tout le reste — requêtes
@@ -419,17 +470,20 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-55 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+65 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
 validité syntaxique du code généré, clés étrangères, setters de
 formulaire Reflex, validation regex, style CSS, graphiques (`chart`,
 4 types, source entité/requête), champs riches `fichier`/`image`/
 `couleur` (upload, pickers natifs, rendu tableau/carte enrichi),
-points d'extension custom — dont plusieurs tests qui **importent
-réellement** le backend et le frontend générés (pas seulement une
-vérification de syntaxe) : flux JWT complet (inscription, connexion,
-rôles, routes protégées) et route de requête déclarative via
-`TestClient`, upload de fichier réel servi par le montage statique,
-et construction effective de l'arbre de composants Reflex de chaque
+notifications email (`email` + `notifier:`), points d'extension custom
+— dont plusieurs tests qui **importent réellement** le backend et le
+frontend générés (pas seulement une vérification de syntaxe) : flux
+JWT complet (inscription, connexion, rôles, routes protégées) et
+route de requête déclarative via `TestClient`, upload de fichier réel
+servi par le montage statique, notification email envoyée sur
+create/delete (connexion SMTP simulée, reste du code réellement
+exécuté) et échec SMTP n'interrompant jamais la requête, et
+construction effective de l'arbre de composants Reflex de chaque
 page (graphique, formulaire avec zone d'upload, carte).
 
 ### Limites connues du MVP
@@ -454,9 +508,13 @@ page (graphique, formulaire avec zone d'upload, carte).
   `backend_data`) sans limite de taille/type appliquée par défaut, ni
   redimensionnement d'image — à ajouter via `routers_custom/` avant un
   déploiement public si nécessaire.
-- Pas de calendrier interactif, pas d'envoi d'email, pas de contenu ou de
-  texte d'interface multilingue au runtime (langue du site fixée par
-  `application { langue: ... }`) — phases prévues mais pas encore livrées.
+- Le bloc `email`/`notifier:` envoie un texte simple bilingue généré
+  automatiquement (sujet + id de l'enregistrement) — pas de template
+  HTML, de pièce jointe, ni de destinataire dynamique par enregistrement
+  dans ce MVP ; pour un contenu personnalisé, `routers_custom/`.
+- Pas de calendrier interactif, pas de contenu ou de texte d'interface
+  multilingue au runtime (langue du site fixée par `application {
+  langue: ... }`) — phases prévues mais pas encore livrées.
 - Pas encore de NOVA Studio (IDE dédié), Marketplace, NOVA Cloud, NOVA AI
   — ce dépôt couvre le compilateur (Phase 1/2 de la feuille de route).
 
@@ -749,6 +807,56 @@ browser** (image previews, download links), the latter stays the
 internal Docker URL used for server-to-server calls — the two diverge
 as soon as you go beyond a local `docker compose up`.
 
+### Email notifications (`email` + `notifier:`)
+
+An optional `email { ... }` block (once per project) declares the
+default SMTP configuration; the `notifier:` option on an `api` block
+triggers a simple email after each listed action:
+
+```
+email {
+  host: "smtp.mailtrap.io"
+  port: 2525
+  from: "noreply@shop.com"
+  to: "ops@shop.com"
+}
+
+api Product {
+  create
+  delete
+  notifier: create, delete
+}
+```
+
+Generates `backend/app/emailer.py` (a `send_email` function using the
+standard library's `smtplib` — **no extra Python dependency**) and
+automatically calls it at the end of the `create`/`update`/`delete`
+handlers listed after `notifier:` in the generated router. Behavior to
+know about:
+
+- **The SMTP password is never written to the `.nova` file**: no
+  property of the `email` block carries it. It's supplied at runtime
+  exclusively via the `NOVA_SMTP_PASSWORD` environment variable
+  (`docker-compose.yml` gets a `NOVA_SMTP_PASSWORD: ""` line to fill
+  in) — same principle as `NOVA_JWT_SECRET` for authentication. The
+  other properties (`host`/`port`/`user`/`from`/`to`/`tls`) can be
+  overridden without recompiling via `NOVA_SMTP_HOST`/`NOVA_SMTP_PORT`/
+  `NOVA_SMTP_USER`/`NOVA_SMTP_FROM`/`NOVA_SMTP_TO`/`NOVA_SMTP_TLS`.
+- **A send failure never breaks the request**: `send_email` catches
+  any error (unreachable server, invalid credentials...) and logs it
+  as a warning — a create/update/delete always succeeds even if the
+  email didn't go out. A notification is a side effect, not a
+  guarantee.
+- `notifier:` only accepts `create`/`update`/`delete` (notifying on a
+  read — list/get — doesn't make sense) and requires an `email { ... }`
+  block to be declared somewhere in the file — otherwise `nova check`/
+  `nova compile` refuses to compile rather than producing a project
+  whose notification would fail silently.
+- The message sent is a simple, automatically generated bilingual text
+  (subject + body mentioning the entity and its id) — no HTML template
+  or attachment in this MVP; for custom content, call
+  `send_email(subject=..., body=..., to=...)` from `routers_custom/`.
+
 ### Beyond the DSL: "custom" extension points
 
 The DSL covers simple CRUD and UI. For everything else — complex
@@ -792,17 +900,20 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-55 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+65 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
 generated-code syntactic validity, foreign keys, explicit Reflex form
 setters, regex validation, CSS styling, charts (`chart`, 4 types,
 entity/query source), rich `file`/`image`/`color` fields (upload,
-native pickers, enriched table/card rendering), custom extension
-points — including several tests that **actually import** the
-generated backend and frontend (not just a syntax check): a full JWT
-flow (register, login, roles, protected routes) and the
-declarative-query route via `TestClient`, a real file upload served
-back by the static mount, and actually building the Reflex component
-tree of every page (chart, form with an upload zone, card).
+native pickers, enriched table/card rendering), email notifications
+(`email` + `notifier:`), custom extension points — including several
+tests that **actually import** the generated backend and frontend (not
+just a syntax check): a full JWT flow (register, login, roles,
+protected routes) and the declarative-query route via `TestClient`, a
+real file upload served back by the static mount, an email
+notification actually sent on create/delete (SMTP connection itself
+mocked, everything else real code) and a send failure that never
+breaks the request, and actually building the Reflex component tree
+of every page (chart, form with an upload zone, card).
 
 ### Known MVP limitations
 
@@ -828,9 +939,13 @@ tree of every page (chart, form with an upload zone, card).
   (`backend_data` volume) with no size/type limit or image resizing
   applied by default — add this via `routers_custom/` before a public
   deployment if needed.
-- No interactive calendar, no email sending, no multilingual site
-  content or UI text at runtime yet (site language fixed by
-  `app { language: ... }`) — planned but not yet delivered phases.
+- The `email`/`notifier:` block sends a simple, automatically generated
+  bilingual text (subject + record id) — no HTML template, attachment,
+  or per-record dynamic recipient in this MVP; for custom content,
+  `routers_custom/`.
+- No interactive calendar, no multilingual site content or UI text at
+  runtime yet (site language fixed by `app { language: ... }`) —
+  planned but not yet delivered phases.
 - Not yet included: NOVA Studio (dedicated IDE), Marketplace, NOVA
   Cloud, NOVA AI — this repo covers the compiler (roadmap Phase 1/2).
 

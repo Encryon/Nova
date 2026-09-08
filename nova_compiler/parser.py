@@ -10,7 +10,21 @@ from lark import Lark, Transformer, v_args
 from lark.exceptions import LarkError
 
 from . import keywords as kw
-from .ast_nodes import Api, App, Auth, Chart, Entity, Field, NovaProgram, Page, PageShow, Query, QueryFilter, Relation
+from .ast_nodes import (
+    Api,
+    App,
+    Auth,
+    Chart,
+    Email,
+    Entity,
+    Field,
+    NovaProgram,
+    Page,
+    PageShow,
+    Query,
+    QueryFilter,
+    Relation,
+)
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar" / "nova.lark"
 
@@ -101,6 +115,12 @@ class _NovaTransformer(Transformer):
     def protect_stmt(self, _kw_tok, role_tok):
         return ("protect", str(role_tok))
 
+    def notify_action(self, tok):
+        return kw.ACTIONS.get(str(tok), str(tok))
+
+    def notify_stmt(self, _kw_tok, *actions):
+        return ("notify", list(actions))
+
     def api_member(self, member):
         return member
 
@@ -109,6 +129,8 @@ class _NovaTransformer(Transformer):
         for m in members:
             if isinstance(m, tuple) and m[0] == "protect":
                 api.protected_role = m[1]
+            elif isinstance(m, tuple) and m[0] == "notify":
+                api.notify_actions = m[1]
             else:
                 api.actions.append(m)
         return api
@@ -232,6 +254,44 @@ class _NovaTransformer(Transformer):
                 chart.title = str(val)
         return chart
 
+    # ---- email -------------------------------------------------------------
+    def email_value(self, tok):
+        # Même logique que `value()` (bool/string/int/identifiant nu), mais
+        # via un non-terminal dédié — voir le commentaire sur `email_decl`
+        # dans grammar/nova.lark (même raison que `chart_value`).
+        text = str(tok)
+        if text in kw.BOOLEANS:
+            return kw.BOOLEANS[text]
+        if text.startswith('"'):
+            return kw.strip_quotes(text)
+        try:
+            return int(text)
+        except ValueError:
+            return text
+
+    def email_prop(self, key_tok, value):
+        # Comme `chart_prop` : clé NAME libre résolue via un dict Python
+        # (kw.EMAIL_PROP_ALIASES), pas un mot-clé de grammaire par langue.
+        key = kw.EMAIL_PROP_ALIASES.get(str(key_tok), str(key_tok))
+        return (key, value)
+
+    def email_decl(self, _kw_tok, *props):
+        email = Email()
+        for key, val in props:
+            if key == "host":
+                email.host = str(val)
+            elif key == "port":
+                email.port = int(val)
+            elif key == "user":
+                email.user = str(val)
+            elif key == "from":
+                email.from_addr = str(val)
+            elif key == "to":
+                email.to_addr = str(val)
+            elif key == "tls":
+                email.tls = bool(val) if isinstance(val, bool) else str(val) not in ("0", "false", "non", "no")
+        return email
+
     # ---- programme -----------------------------------------------------
     def statement(self, stmt):
         return stmt
@@ -253,6 +313,8 @@ class _NovaTransformer(Transformer):
                 program.queries.append(s)
             elif isinstance(s, Chart):
                 program.charts.append(s)
+            elif isinstance(s, Email):
+                program.email = s
         return program
 
 
@@ -272,6 +334,7 @@ def parse_source(source: str) -> NovaProgram:
         raise NovaSyntaxError(str(exc)) from exc
     program = _NovaTransformer().transform(tree)
     _validate_charts(program)
+    _validate_notifiers(program)
     return program
 
 
@@ -289,6 +352,22 @@ def _validate_charts(program: NovaProgram) -> None:
                 f"chart '{chart.name}': la source '{chart.source}' (après 'sur') "
                 f"ne correspond à aucune entité ni requête déclarée."
             )
+
+
+def _validate_notifiers(program: NovaProgram) -> None:
+    """`api <Entité> { ... notifier: creer, ... }` nécessite un bloc `email
+    { ... }` déclaré quelque part dans le fichier : sans lui, il n'y a
+    aucune configuration SMTP à utiliser au moment d'envoyer la
+    notification. Comme pour `_validate_charts`, on le détecte à la
+    compilation (`nova check`/`nova compile`) plutôt que de générer un
+    projet dont la notification échouerait silencieusement (ou lèverait une
+    NameError à l'import faute de module `emailer` généré)."""
+    if any(api.notify_actions for api in program.apis) and program.email is None:
+        offending = next(api for api in program.apis if api.notify_actions)
+        raise NovaSyntaxError(
+            f"api '{offending.entity}': 'notifier:' nécessite un bloc "
+            f"'email {{ ... }}' déclaré dans le projet (configuration SMTP)."
+        )
 
 
 def parse_file(path: str | Path) -> NovaProgram:

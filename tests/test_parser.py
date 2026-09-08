@@ -421,3 +421,76 @@ def test_rich_field_types_file_image_color_recognize_all_six_languages():
         for lang, word in per_lang.items():
             program = parse_source(f"entity P {{ field x: {word} }}")
             assert program.entities[0].fields[0].type == canonical, (canonical, lang, word)
+
+
+def test_email_block_parses_all_props_and_notify_stmt_on_api():
+    src = """
+    entity Produit { field nom: string required }
+    email {
+      host: "smtp.example.com"
+      port: 2525
+      user: "nova"
+      from: "noreply@example.com"
+      to: "admin@example.com"
+      tls: false
+    }
+    api Produit {
+      create
+      update
+      delete
+      notifier: create, update, delete
+    }
+    """
+    program = parse_source(src)
+    assert program.email.host == "smtp.example.com"
+    assert program.email.port == 2525
+    assert program.email.user == "nova"
+    assert program.email.from_addr == "noreply@example.com"
+    assert program.email.to_addr == "admin@example.com"
+    assert program.email.tls is False
+    assert program.apis[0].notify_actions == ["create", "update", "delete"]
+
+
+def test_email_block_defaults_when_props_omitted():
+    program = parse_source("email { }")
+    assert program.email.host == "localhost"
+    assert program.email.port == 587
+    assert program.email.tls is True
+    assert program.email.to_addr == ""
+
+
+def test_email_keyword_and_prop_aliases_recognize_all_six_languages():
+    # Mot-clé du bloc (email/courriel/correo/correio) et alias de propriétés
+    # (hote/host/servidor, expediteur/from/remitente/absender/mittente/
+    # remetente, destinataire/to/destinatario/empfaenger) dans les 6 langues,
+    # plus le mot-clé `notifier`/`notify`/`notificar`/`benachrichtigen`/
+    # `notificare` sur `api`.
+    sources = {
+        "fr": 'courriel { hote: "s" expediteur: "a@a" destinataire: "b@b" }\n'
+        "entity P { field n: string }\napi P { create notifier: creer }",
+        "en": 'email { host: "s" from: "a@a" to: "b@b" }\n'
+        "entity P { field n: string }\napi P { create notify: create }",
+        "es": 'correo { servidor: "s" remitente: "a@a" destinatario: "b@b" }\n'
+        "entity P { field n: string }\napi P { create notificar: crear }",
+        "de": 'email { host: "s" absender: "a@a" empfaenger: "b@b" }\n'
+        "entity P { field n: string }\napi P { create benachrichtigen: erstellen }",
+        "it": 'email { host: "s" mittente: "a@a" destinatario: "b@b" }\n'
+        "entity P { field n: string }\napi P { create notificare: creare }",
+        "pt": 'correio { host: "s" remetente: "a@a" destinatario: "b@b" }\n'
+        "entity P { field n: string }\napi P { create notificar: criar }",
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        assert program.email is not None, lang
+        assert program.email.from_addr == "a@a", lang
+        assert program.email.to_addr == "b@b", lang
+        assert program.apis[0].notify_actions == ["create"], lang
+
+
+def test_notifier_without_email_block_raises_syntax_error():
+    src = """
+    entity Produit { field nom: string }
+    api Produit { create notifier: create }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)

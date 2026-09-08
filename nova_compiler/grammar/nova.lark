@@ -14,6 +14,7 @@ statement: app_decl
          | auth_decl
          | query_decl
          | chart_decl
+         | email_decl
 
 // ---------------------------------------------------------------- app -----
 // Optional single block describing the application itself.
@@ -47,8 +48,16 @@ relation_decl: HAS_MANY_KW NAME
 api_decl: API_KW NAME "{" api_member* "}"
 api_member: api_action
           | protect_stmt
+          | notify_stmt
 api_action: LIST_KW | CREATE_KW | UPDATE_KW | DELETE_KW | GET_KW
 protect_stmt: PROTECT_KW ":" NAME
+// `notifier: creer, supprimer` (alias `notify: create, delete`...) : envoie
+// un email (voir bloc `email { ... }` plus bas) après chaque action listée.
+// Restreint volontairement à create/update/delete (des NOM d'action déjà
+// définis pour `api_action`, réutilisés tels quels) : notifier sur une
+// lecture (list/get) n'a pas de sens.
+notify_stmt: NOTIFIER_KW ":" notify_action ("," notify_action)*
+notify_action: CREATE_KW | UPDATE_KW | DELETE_KW
 
 // --------------------------------------------------------------- page -----
 page_decl: PAGE_KW NAME "{" page_stmt* "}"
@@ -93,6 +102,22 @@ chart_decl: CHART_KW NAME SUR_KW NAME "{" chart_prop* "}"
 chart_prop: NAME ":" chart_value
 chart_value: STRING | NAME
 
+// -------------------------------------------------------------- email -----
+// Bloc optionnel unique : configuration SMTP pour les notifications
+// déclenchées par `notifier:` sur un bloc `api` (voir ci-dessus). Comme
+// `chart`, les propriétés (`hote`/`host`, `port`, `utilisateur`/`user`,
+// `expediteur`/`from`, `destinataire`/`to`, `tls`) sont des NAME libres
+// résolues via `keywords.EMAIL_PROP_ALIASES`, pas des terminaux dédiés par
+// langue. `email_value` est un non-terminal dédié (pas le `value` générique
+// partagé par `app_prop`/`query_prop`) pour la même raison que `chart_value`
+// — voir le commentaire au-dessus de `chart_prop`. Le mot de passe SMTP
+// n'est volontairement PAS un mot-clé de ce bloc : jamais de secret en
+// clair dans le fichier .nova, toujours fourni au runtime via la variable
+// d'environnement NOVA_SMTP_PASSWORD (voir codegen/api_fastapi.py).
+email_decl: EMAIL_KW "{" email_prop* "}"
+email_prop: NAME ":" email_value
+email_value: STRING | NUMBER | BOOL_TRUE | BOOL_FALSE | NAME
+
 // ================================================== multilingual terminals ===
 APP_KW: "app" | "application" | "aplicacion" | "aplicación" | "anwendung" | "applicazione" | "aplicacao" | "aplicação"
 ENTITY_KW: "entity" | "entité" | "entite" | "entidad" | "entitaet" | "entität" | "entita" | "entità" | "entidade"
@@ -111,6 +136,7 @@ UPDATE_KW: "update" | "modifier" | "mettre_a_jour" | "mettre_à_jour" | "actuali
 DELETE_KW: "delete" | "supprimer" | "eliminar" | "borrar" | "loeschen" | "löschen" | "eliminare" | "excluir"
 GET_KW: "get" | "obtenir" | "lire" | "obtener" | "erhalten" | "holen" | "ottenere" | "obter"
 PROTECT_KW: "proteger" | "protect" | "protéger" | "proteggere" | "schuetzen" | "schützen"
+NOTIFIER_KW: "notifier" | "notify" | "notificar" | "benachrichtigen" | "notificare"
 
 PAGE_KW: "page" | "pagina" | "página" | "seite"
 SHOW_KW: "show" | "afficher" | "mostrar" | "zeigen" | "anzeigen" | "mostrare" | "exibir"
@@ -126,6 +152,8 @@ ROLES_KW: "roles" | "rôles" | "rollen" | "ruoli" | "papeis" | "papéis"
 DEFAULT_ROLE_KW: "role_par_defaut" | "role_par_défaut" | "default_role" | "rol_por_defecto" | "standardrolle" | "ruolo_predefinito" | "papel_padrao" | "papel_padrão"
 
 CHART_KW: "chart" | "graphique" | "grafico" | "gráfico" | "diagramm"
+
+EMAIL_KW: "email" | "courriel" | "correo" | "correio"
 
 QUERY_KW: "requete" | "requête" | "query" | "consulta" | "abfrage" | "interrogazione"
 SUR_KW: "sur" | "on" | "from" | "en" | "von" | "su" | "em"

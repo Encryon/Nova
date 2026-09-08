@@ -149,6 +149,46 @@ publique). Une référence inconnue lève une erreur à la compilation
 (`chart X sur Y` où `Y` n'est ni une entité ni une requête déclarée),
 pas une page qui échoue silencieusement au premier chargement.
 
+## Notifications email (bloc `email { ... }` + `notifier:` sur `api`)
+
+| Mot-clé | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Bloc email / Email block | `courriel` | `email` | `correo` | `email` | `email` | `correio` |
+| Notifier (sur `api`) / Notify (on `api`) | `notifier` | `notify` | `notificar` | `benachrichtigen` | `notificare` | `notificar` |
+
+Comme pour `chart` ci-dessus, les propriétés à l'intérieur de
+`email { ... }` sont des alias déclarés dans `keywords.EMAIL_PROP_ALIASES`,
+pas des mots-clés de grammaire dédiés :
+
+| Propriété | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Serveur / Host | `hote` / `serveur` | `host` | `servidor` / `host` | `host` | `host` | `host` |
+| Port | `port` | `port` | `puerto` / `port` | `port` | `porta` / `port` | `port` |
+| Utilisateur / User | `utilisateur` | `user` | `usuario` | `benutzer` / `user` | `utente` / `user` | `user` |
+| Expéditeur / From | `expediteur` / `expéditeur` | `from` | `remitente` | `absender` | `mittente` | `remetente` |
+| Destinataire / To | `destinataire` | `to` | `destinatario` | `empfaenger` / `empfänger` | `destinatario` | `destinatario` |
+| TLS | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` |
+
+`notifier:`/`notify:` accepte une liste d'actions séparées par des
+virgules, parmi les mêmes mots-clés que le bloc `api` (`creer`/`create`,
+`modifier`/`update`, `supprimer`/`delete` — pas `liste`/`list` ni
+`obtenir`/`get`, notifier sur une lecture n'ayant pas de sens) :
+
+```
+api Produit {
+  creer
+  supprimer
+  notifier: creer, supprimer
+}
+```
+
+**Volontairement absent de ce bloc : le mot de passe SMTP.** Aucune
+propriété ne le porte — il n'existe aucun mot-clé pour lui dans aucune
+langue. Il est fourni exclusivement au runtime via la variable
+d'environnement `NOVA_SMTP_PASSWORD` (voir README, section
+"Notifications par email"). `notifier:` sans bloc `email { ... }`
+déclaré dans le même fichier lève une erreur à la compilation.
+
 ## Exemple : le même programme en 4 langues / Example: the same program in 4 languages
 
 ```
