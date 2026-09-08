@@ -151,8 +151,11 @@ class _NovaTransformer(Transformer):
         return [str(n) for n in names]
 
     def auth_prop(self, kw_tok, value):
-        key = str(kw_tok)
-        if key in ("roles", "rôles"):
+        # Comparer le *type* du token (ROLES_KW / DEFAULT_ROLE_KW) plutôt que
+        # son texte : chaque mot-clé a des synonymes dans 6 langues (voir
+        # grammar/nova.lark) et un test sur le texte brut en oublierait la
+        # plupart (bug réel trouvé lors de l'extension ES/DE/IT/PT).
+        if kw_tok.type == "ROLES_KW":
             return ("roles", value)
         return ("default_role", str(value))
 
@@ -169,17 +172,19 @@ class _NovaTransformer(Transformer):
 
     # ---- query ---------------------------------------------------------------
     def query_prop(self, kw_tok, *rest):
-        key = str(kw_tok)
-        if key in ("filtre", "filter"):
+        # Même principe que `auth_prop` ci-dessus : comparer `kw_tok.type`
+        # (FILTRE_KW / TRIER_KW / LIMITE_KW) et non le texte du token, qui
+        # varie selon la langue source (`filtro`, `ordina_per`, `límite`...).
+        if kw_tok.type == "FILTRE_KW":
             field_tok, comparator_tok, val = rest
             return ("filter", QueryFilter(field=str(field_tok), op=str(comparator_tok), value=val))
-        if key in ("trier_par", "sort_by", "order_by"):
+        if kw_tok.type == "TRIER_KW":
             field_tok = rest[0]
             direction = "asc"
             if len(rest) > 1 and getattr(rest[1], "type", None) == "DESC_KW":
                 direction = "desc"
             return ("order", (str(field_tok), direction))
-        if key in ("limite", "limit"):
+        if kw_tok.type == "LIMITE_KW":
             return ("limit", int(str(rest[0])))
         return ("unknown", None)
 

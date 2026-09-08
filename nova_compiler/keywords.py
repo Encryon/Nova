@@ -69,6 +69,7 @@ PROP_NAMES = {
     "lang": "lang", "langue": "lang", "idioma": "lang", "lingua": "lang", "sprache": "lang",
     "version": "version",
     "css": "css", "feuille_style": "css", "stylesheet": "css",
+    "hoja_estilo": "css", "stildatei": "css", "foglio_stile": "css", "folha_estilo": "css",
 }
 
 # ---- modificateurs de champ (`required`/`unique`/`pattern`) --------------

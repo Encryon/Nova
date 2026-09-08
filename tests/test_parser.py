@@ -237,3 +237,78 @@ def test_page_show_without_style_block_has_empty_style_dict():
         "entity X { field n: string }\npage P { show X as table }"
     )
     assert program.pages[0].shows[0].style == {}
+
+
+def test_auth_and_query_blocks_recognize_all_six_languages():
+    """Régression : `auth_prop`/`query_prop` comparaient le *texte* du
+    token (`str(kw_tok) in ("roles", "rôles")`, etc.) plutôt que son type
+    Lark (`ROLES_KW`). La grammaire reconnaissait bien `rollen`/`ruoli`/
+    `papeis` (DE/IT/PT) comme un mot-clé `ROLES_KW` valide, mais le
+    parser les traitait silencieusement comme `default_role` faute de
+    correspondre au texte français/anglais codé en dur — sans erreur,
+    juste un AST incorrect (`auth.roles` pollué, `filtre`/`trier_par`/
+    `limite` de la requête ignorés). Un seul test en français/anglais ne
+    pouvait pas détecter ce genre de bug ; il faut vérifier chaque langue."""
+    sources = {
+        "es": """
+        entidad Producto { campo precio: decimal }
+        autenticacion { roles: admin, user }
+        api Producto { listar proteger: admin }
+        consulta CarosProductos en Producto {
+          filtro: precio > 100
+          ordenar_por: precio descendente
+          limite: 5
+        }
+        """,
+        "de": """
+        entität Produkt { feld preis: gleitkomma }
+        authentifizierung { rollen: admin, user }
+        api Produkt { liste schützen: admin }
+        query TeureProdukte von Produkt {
+          filter: preis > 100
+          sortieren_nach: preis absteigend
+          limit: 5
+        }
+        """,
+        "it": """
+        entità Prodotto { campo prezzo: decimale }
+        auth { ruoli: admin, user }
+        api Prodotto { elenco proteggere: admin }
+        query ProdottiCari su Prodotto {
+          filter: prezzo > 100
+          ordina_per: prezzo decrescente
+          limit: 5
+        }
+        """,
+        "pt": """
+        entidade Produto { campo preco: decimal }
+        auth { papeis: admin, user }
+        api Produto { elenco proteger: admin }
+        query ProdutosCaros em Produto {
+          filter: preco > 100
+          ordenar_por: preco descendente
+          limite: 5
+        }
+        """,
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        assert program.auth.roles == ["admin", "user"], lang
+        assert program.apis[0].protected_role == "admin", lang
+        q = program.queries[0]
+        assert q.order_dir == "desc", lang
+        assert q.limit == 5, lang
+        assert len(q.filters) == 1 and q.filters[0].value == 100, lang
+
+
+def test_style_and_css_prop_keywords_recognize_all_six_languages():
+    sources = {
+        "es": 'aplicacion T { nombre: "T" css: "tema.css" }\nentidad P { campo n: cadena }\npage Pg { show P as table estilo { color: "red" } }',
+        "de": 'anwendung T { name: "T" css: "thema.css" }\nentität P { feld n: zeichenkette }\npage Pg { show P as table stil { color: "red" } }',
+        "it": 'applicazione T { nome: "T" css: "tema.css" }\nentità P { campo n: stringa }\npage Pg { show P as table stile { color: "red" } }',
+        "pt": 'aplicacao T { nome: "T" css: "tema.css" }\nentidade P { campo n: cadeia }\npage Pg { show P as table estilo { color: "red" } }',
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        assert program.app.props.get("css") == ("tema.css" if lang != "de" else "thema.css"), lang
+        assert program.pages[0].shows[0].style == {"color": "red"}, lang

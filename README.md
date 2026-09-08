@@ -10,10 +10,10 @@
 ![Statut](https://img.shields.io/badge/statut-fair--source%20/%20open-6e4bf0)
 ![Version](https://img.shields.io/badge/version-0.3.0-6e4bf0)
 ![Python](https://img.shields.io/badge/python-3.11%2B-6e4bf0)
-![Tests](https://img.shields.io/badge/tests-36%20passed-2f9e6e)
+![Tests](https://img.shields.io/badge/tests-38%20passed-2f9e6e)
 ![Licence](https://img.shields.io/badge/licence-BSL%201.1%20→%20Apache%202.0-a8630f)
 
-[🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Licence](#licence--license)
+[🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Référence des mots-clés (6 langues)](docs/REFERENCE.md) · [Licence](#licence--license)
 
 </div>
 
@@ -184,9 +184,11 @@ pour un fichier qui mélange français et anglais.
 | Types | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure` | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime` |
 
 Ce tableau ne couvre que FR/EN pour rester lisible ; espagnol, allemand,
-italien et portugais sont acceptés pour les mêmes mots-clés — voir
-`nova_compiler/keywords.py` et `nova_compiler/grammar/nova.lark` pour la
-liste complète des synonymes par langue.
+italien et portugais sont acceptés pour les mêmes mots-clés (y compris
+les blocs `style`/`auth`/`requete` ajoutés récemment) — voir la
+**[référence complète en 6 langues](docs/REFERENCE.md)** pour le détail
+mot-clé par mot-clé, avec un exemple complet dans chacune des 4 langues
+ajoutées.
 
 ### Validation par expression régulière
 
@@ -335,7 +337,7 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-36 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+38 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
 validité syntaxique du code généré, clés étrangères, setters de
 formulaire Reflex, validation regex, style CSS, points d'extension
 custom — dont plusieurs tests qui **importent réellement** le backend
@@ -464,9 +466,10 @@ for a file mixing French and English.
 | Types | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime` | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure` |
 
 This table only covers EN/FR for readability; Spanish, German, Italian
-and Portuguese are accepted for the same keywords — see
-`nova_compiler/keywords.py` and `nova_compiler/grammar/nova.lark` for
-the full per-language synonym list.
+and Portuguese are accepted for the same keywords (including the
+recently added `style`/`auth`/`query` blocks) — see the **[full
+6-language reference](docs/REFERENCE.md)** for the keyword-by-keyword
+detail, with a complete example in each of the 4 added languages.
 
 ### Regex field validation
 
@@ -614,7 +617,7 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-36 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+38 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
 generated-code syntactic validity, foreign keys, explicit Reflex form
 setters, regex validation, CSS styling, custom extension points —
 including several tests that **actually import** the generated backend
