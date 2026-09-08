@@ -16,6 +16,7 @@ statement: app_decl
          | chart_decl
          | email_decl
          | calendar_decl
+         | translations_decl
 
 // ---------------------------------------------------------------- app -----
 // Optional single block describing the application itself.
@@ -31,6 +32,7 @@ modifier: REQUIRED_KW
         | UNIQUE_KW
         | DEFAULT_KW "=" value
         | PATTERN_KW "=" STRING
+        | MULTILINGUAL_KW
 type_ref: TYPE_STRING
         | TYPE_TEXT
         | TYPE_INT
@@ -62,8 +64,13 @@ notify_action: CREATE_KW | UPDATE_KW | DELETE_KW
 
 // --------------------------------------------------------------- page -----
 page_decl: PAGE_KW NAME "{" page_stmt* "}"
-page_stmt: SHOW_KW NAME (AS_KW display_mode)? (TITLE_KW STRING)? style_block?
+// `titre`/`title` accepte soit une chaîne littérale (affichée telle quelle
+// dans toutes les langues, comportement historique inchangé), soit une clé
+// nue référençant une entrée du bloc `traductions { ... }` (voir plus bas)
+// — résolue au moment de la génération (`title_value`), pas ici.
+page_stmt: SHOW_KW NAME (AS_KW display_mode)? (TITLE_KW title_value)? style_block?
 display_mode: TABLE_KW | FORM_KW | CARD_KW
+title_value: STRING | NAME
 style_block: STYLE_KW "{" style_prop* "}"
 style_prop: NAME ":" STRING
 
@@ -132,6 +139,19 @@ calendar_decl: CALENDAR_KW NAME SUR_KW NAME "{" calendar_prop* "}"
 calendar_prop: NAME ":" calendar_value
 calendar_value: STRING | NAME
 
+// -------------------------------------------------------------- i18n -----
+// Bloc optionnel (répétable) `traductions { cle: { fr: "..." en: "..." ... } }` :
+// textes d'interface (titres de page, etc.) déclarés une fois par clé et
+// traduits dans les 6 langues, référencés ailleurs dans le fichier par leur
+// clé nue (voir `title_value` ci-dessus) plutôt qu'écrits en dur. Les codes
+// de langue (`fr`/`en`/`es`/`de`/`it`/`pt`) sont, comme pour `chart`/`email`/
+// `calendar`, des NAME libres validés en Python (`keywords.LANG_CODES`) et
+// non des terminaux Lark dédiés par langue — même raison que `chart_value` :
+// voir le commentaire au-dessus de `chart_prop`.
+translations_decl: TRANSLATIONS_KW "{" translation_entry* "}"
+translation_entry: NAME "{" lang_prop* "}"
+lang_prop: NAME ":" STRING
+
 // ================================================== multilingual terminals ===
 APP_KW: "app" | "application" | "aplicacion" | "aplicación" | "anwendung" | "applicazione" | "aplicacao" | "aplicação"
 ENTITY_KW: "entity" | "entité" | "entite" | "entidad" | "entitaet" | "entität" | "entita" | "entità" | "entidade"
@@ -140,6 +160,7 @@ REQUIRED_KW: "required" | "requis" | "requerido" | "obligatorio" | "erforderlich
 UNIQUE_KW: "unique" | "unico" | "único" | "eindeutig"
 DEFAULT_KW: "default" | "defaut" | "défaut" | "par_defaut" | "par_défaut" | "predeterminado" | "por_defecto" | "standard" | "predefinito" | "padrao" | "padrão"
 PATTERN_KW: "pattern" | "motif" | "regex" | "patron" | "patrón" | "muster" | "modello" | "formato"
+MULTILINGUAL_KW: "multilingual" | "multilingue" | "multilingüe" | "mehrsprachig" | "multilingua" | "multilíngue"
 HAS_MANY_KW: "has_many" | "possede_plusieurs" | "possède_plusieurs" | "tiene_muchos" | "hat_viele" | "ha_molti" | "tem_muitos"
 BELONGS_TO_KW: "belongs_to" | "appartient_a" | "appartient_à" | "pertenece_a" | "gehoert_zu" | "gehört_zu" | "appartiene_a" | "pertence_a"
 
@@ -170,6 +191,8 @@ CHART_KW: "chart" | "graphique" | "grafico" | "gráfico" | "diagramm"
 EMAIL_KW: "email" | "courriel" | "correo" | "correio"
 
 CALENDAR_KW: "calendar" | "calendrier" | "calendario" | "calendário" | "kalender"
+
+TRANSLATIONS_KW: "translations" | "traductions" | "traducciones" | "übersetzungen" | "traduzioni" | "traduções"
 
 QUERY_KW: "requete" | "requête" | "query" | "consulta" | "abfrage" | "interrogazione"
 SUR_KW: "sur" | "on" | "from" | "en" | "von" | "su" | "em"

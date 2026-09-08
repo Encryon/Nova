@@ -30,6 +30,7 @@ identiques dans plusieurs langues).
 | Unique | `unique` | `unique` | `unico` / `único` | `eindeutig` | `unico` | `unico` / `único` |
 | Défaut / Default | `defaut` / `défaut` / `par_defaut` | `default` | `predeterminado` / `por_defecto` | `standard` | `predefinito` | `padrao` / `padrão` |
 | Regex / Pattern | `motif` / `regex` | `pattern` / `regex` | `patron` / `patrón` | `muster` | `modello` | `formato` |
+| Multilingue / Multilingual | `multilingue` | `multilingual` | `multilingüe` | `mehrsprachig` | `multilingua` | `multilíngue` |
 
 ## Relations
 
@@ -234,6 +235,60 @@ calendrier Ajouts sur Produit {
   grille mensuelle calculée côté serveur via la seule bibliothèque
   standard Python (`calendar`, `datetime`) — aucune dépendance JS
   supplémentaire, vue lecture seule dans ce MVP.
+
+## Contenu multilingue (bloc `traductions { ... }` + champ `multilingue`)
+
+| Mot-clé | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Bloc traductions / Translations block | `traductions` | `translations` | `traducciones` | `übersetzungen` | `traduzioni` | `traduções` |
+| Modificateur multilingue / Multilingual modifier | `multilingue` | `multilingual` | `multilingüe` | `mehrsprachig` | `multilingua` | `multilíngue` |
+
+Les 6 codes de langue utilisés à la fois comme clés à l'intérieur d'un
+bloc `traductions { <cle> { <code>: "<texte>" ... } }` et comme suffixes
+des colonnes générées pour un champ `multilingue` sont toujours
+`fr`/`en`/`es`/`de`/`it`/`pt` (`keywords.LANG_CODES`) — non
+traduits/localisés eux-mêmes, contrairement aux autres mots-clés de ce
+document :
+
+```
+traductions {
+  titre_catalogue {
+    fr: "Catalogue"
+    en: "Catalog"
+    es: "Catálogo"
+    de: "Katalog"
+    it: "Catalogo"
+    pt: "Catálogo"
+  }
+}
+
+entité Produit {
+  champ nom: chaine requis
+  champ description: texte multilingue
+}
+
+page Produits {
+  afficher Produit comme table titre titre_catalogue
+}
+```
+
+- Chaque entrée du bloc `traductions` doit fournir les 6 langues — une
+  langue manquante lève une erreur à la compilation.
+- `titre <cle>` (NAME nu, sans guillemets) référence une entrée du bloc
+  `traductions` ; `titre "Texte"` (STRING) reste un texte littéral
+  affiché tel quel quelle que soit la langue — les deux formes sont
+  mutuellement exclusives sur un même `show`. Une clé `titre <cle>`
+  inconnue lève une erreur à la compilation.
+- Le modificateur `multilingue`/`multilingual` n'est valide que sur un
+  champ `chaine`/`string` ou `texte`/`text`, et ne peut pas être combiné
+  avec `requis`/`unique`/`motif` dans ce MVP.
+- Génère une colonne par langue en base (`<champ>_fr` ...
+  `<champ>_pt`, toutes optionnelles), un état Reflex `LangState` partagé
+  (langue courante persistée en cookie navigateur), un sélecteur de
+  langue dans la barre de navigation, et une fonction `t_<cle>()` par
+  entrée de `traductions` — toutes deux réactives (`rx.match`), le texte/
+  la valeur affichée change immédiatement au changement de langue, sans
+  rechargement de page.
 
 ## Exemple : le même programme en 4 langues / Example: the same program in 4 languages
 

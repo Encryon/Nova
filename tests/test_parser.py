@@ -586,3 +586,130 @@ def test_calendar_explicit_title_field_unknown_raises_syntax_error():
     """
     with pytest.raises(NovaSyntaxError):
         parse_source(src)
+
+
+# --------------------------------------------------------- multilingual ---
+
+def test_multilingual_field_modifier_sets_flag_and_leaves_others_unset():
+    src = """
+    entity Produit {
+        field nom: string required
+        field titre: string multilingual
+        field prix: float
+    }
+    """
+    program = parse_source(src)
+    fields = {f.name: f for f in program.entities[0].fields}
+    assert fields["titre"].multilingual is True
+    assert fields["nom"].multilingual is False
+    assert fields["prix"].multilingual is False
+
+
+def test_multilingual_keyword_recognizes_all_six_languages():
+    field_src = {
+        "en": "entity P { field titre: string multilingual }",
+        "fr": "entité P { champ titre: chaine multilingue }",
+        "es": "entidad P { campo titre: cadena multilingüe }",
+        "de": "entität P { feld titre: zeichenkette mehrsprachig }",
+        "it": "entità P { campo titre: stringa multilingua }",
+        "pt": "entidade P { campo titre: cadeia multilíngue }",
+    }
+    for lang, src in field_src.items():
+        program = parse_source(src)
+        assert program.entities[0].fields[0].multilingual is True, lang
+
+
+def test_translations_block_parses_all_six_languages_per_entry():
+    src = """
+    translations {
+        accueil {
+            fr: "Bienvenue"
+            en: "Welcome"
+            es: "Bienvenido"
+            de: "Willkommen"
+            it: "Benvenuto"
+            pt: "Bem-vindo"
+        }
+    }
+    entity P { field n: string }
+    """
+    program = parse_source(src)
+    assert program.translations == {
+        "accueil": {
+            "fr": "Bienvenue",
+            "en": "Welcome",
+            "es": "Bienvenido",
+            "de": "Willkommen",
+            "it": "Benvenuto",
+            "pt": "Bem-vindo",
+        }
+    }
+
+
+def test_translations_keyword_recognizes_all_six_languages():
+    body = '{ cle { fr: "a" en: "b" es: "c" de: "d" it: "e" pt: "f" } }'
+    sources = {
+        "en": f"translations {body}\nentity P {{ field n: string }}",
+        "fr": f"traductions {body}\nentity P {{ field n: string }}",
+        "es": f"traducciones {body}\nentity P {{ field n: string }}",
+        "de": f"übersetzungen {body}\nentity P {{ field n: string }}",
+        "it": f"traduzioni {body}\nentity P {{ field n: string }}",
+        "pt": f"traduções {body}\nentity P {{ field n: string }}",
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        assert "cle" in program.translations, lang
+
+
+def test_page_title_literal_string_vs_translation_key():
+    src = """
+    entity P { field n: string }
+    translations {
+        titre_page { fr: "a" en: "b" es: "c" de: "d" it: "e" pt: "f" }
+    }
+    page Un { show P as table title "Texte litteral" }
+    page Deux { show P as table title titre_page }
+    """
+    program = parse_source(src)
+    show_un = program.pages[0].shows[0]
+    show_deux = program.pages[1].shows[0]
+    assert show_un.title == "Texte litteral"
+    assert show_un.title_key is None
+    assert show_deux.title is None
+    assert show_deux.title_key == "titre_page"
+
+
+def test_multilingual_field_on_non_string_type_raises_syntax_error():
+    src = """
+    entity Produit { field prix: float multilingual }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_multilingual_field_combined_with_required_raises_syntax_error():
+    src = """
+    entity Produit { field titre: string required multilingual }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_translations_entry_missing_language_raises_syntax_error():
+    src = """
+    entity P { field n: string }
+    translations {
+        incomplete { fr: "a" en: "b" es: "c" de: "d" it: "e" }
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_page_title_unknown_translation_key_raises_syntax_error():
+    src = """
+    entity P { field n: string }
+    page Un { show P as table title cle_inconnue }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)

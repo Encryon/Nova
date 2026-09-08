@@ -25,6 +25,7 @@ class Field:
     unique: bool = False
     default: Optional[Union[str, int, float, bool]] = None
     pattern: Optional[str] = None  # expression régulière de validation (pattern/motif/regex)
+    multilingual: bool = False     # modificateur `multilingue`/`multilingual` (chaine/texte uniquement)
 
     @property
     def is_reference(self) -> bool:
@@ -61,6 +62,7 @@ class PageShow:
     entity: str
     mode: str = "table"        # "table" | "form" | "card"
     title: Optional[str] = None
+    title_key: Optional[str] = None  # `titre <cle>` référençant un bloc `traductions` (mutuellement exclusif avec `title`)
     style: dict[str, str] = field(default_factory=dict)  # bloc `style { ... }` (voir keywords.STYLE_ALIASES)
 
 
@@ -160,6 +162,9 @@ class NovaProgram:
     charts: list[Chart] = field(default_factory=list)
     email: Optional[Email] = None
     calendars: list[Calendar] = field(default_factory=list)
+    # Bloc(s) `traductions { cle: { fr: "..." ... } }` : cle -> {code_langue: texte}.
+    # Toutes les 6 langues sont requises par entrée (voir parser._validate_translations).
+    translations: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def get_entity(self, name: str) -> Optional[Entity]:
         return next((e for e in self.entities if e.name == name), None)

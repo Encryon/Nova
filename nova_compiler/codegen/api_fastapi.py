@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from ..ast_nodes import Email as _Email
 from ..ast_nodes import Entity, NovaProgram, QueryFilter
+from ..keywords import LANG_CODES
 from .utils import PY_TYPE_MAP, pluralize, to_ascii_identifier, to_pascal_case, to_snake_case
 
 _HEADER = (
@@ -28,6 +29,31 @@ def _model_class_name(entity: Entity) -> str:
 
 def _table_name(entity: Entity) -> str:
     return to_snake_case(pluralize(to_ascii_identifier(entity.name)))
+
+
+def _multilingual_column_names(f) -> list[str]:
+    """Un champ `chaine`/`texte multilingue` devient une colonne par langue
+    (`<champ>_fr`, `<champ>_en`, ... `<champ>_pt`) plutôt qu'une seule
+    colonne — toujours les 6 langues du DSL (`keywords.LANG_CODES`), voir
+    parser._validate_multilingual_fields pour les contraintes associées."""
+    base = to_snake_case(f.name)
+    return [f"{base}_{lang}" for lang in LANG_CODES]
+
+
+def _multilingual_model_lines(f) -> list[str]:
+    """Colonnes de table SQLModel pour un champ multilingue : toutes
+    `Optional[str]` (voir parser._validate_multilingual_fields — `requis`/
+    `unique`/`motif` sont interdits sur un champ `multilingue` dans ce
+    MVP, donc pas de cas à gérer ici au-delà d'un simple champ optionnel)."""
+    return [f"    {col}: Optional[str] = Field(default=None)" for col in _multilingual_column_names(f)]
+
+
+def _multilingual_schema_lines(f) -> list[str]:
+    """Mêmes colonnes que `_multilingual_model_lines`, pour les schémas
+    Create/Update — syntaxe légèrement différente (pas de `Field(...)`),
+    cohérente avec le reste de `_generate_models` pour un champ optionnel
+    sans contrainte."""
+    return [f"    {col}: Optional[str] = None" for col in _multilingual_column_names(f)]
 
 
 def _field_line(entity: Entity, f) -> str:
@@ -76,7 +102,10 @@ def _generate_models(program: NovaProgram) -> str:
         lines.append("")
         lines.append("    id: Optional[int] = Field(default=None, primary_key=True)")
         for f in entity.fields:
-            lines.append(_field_line(entity, f))
+            if f.multilingual:
+                lines += _multilingual_model_lines(f)
+            else:
+                lines.append(_field_line(entity, f))
         for rel in entity.relations:
             if rel.kind == "belongs_to":
                 target_table = to_snake_case(pluralize(to_ascii_identifier(rel.target)))
@@ -100,6 +129,9 @@ def _generate_models(program: NovaProgram) -> str:
         if not body and not fk_field_names:
             lines.append("    pass")
         for f in body:
+            if f.multilingual:
+                lines += _multilingual_schema_lines(f)
+                continue
             py_type = PY_TYPE_MAP.get(f.type, "str") if not f.is_reference else "int"
             type_hint = py_type if f.required else f"Optional[{py_type}]"
             if f.pattern:
@@ -117,6 +149,9 @@ def _generate_models(program: NovaProgram) -> str:
         if not body and not fk_field_names:
             lines.append("    pass")
         for f in body:
+            if f.multilingual:
+                lines += _multilingual_schema_lines(f)
+                continue
             py_type = PY_TYPE_MAP.get(f.type, "str") if not f.is_reference else "int"
             if f.pattern:
                 lines.append(

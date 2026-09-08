@@ -1,7 +1,9 @@
 // Exemple complet : authentification JWT + rôles, requête déclarative,
-// style CSS (fichier externe + style tableau), et mots-clés multilingues.
+// style CSS (fichier externe + style tableau), mots-clés multilingues, et
+// contenu multilingue (textes d'interface + champ de donnée traduit).
 // Full-featured example: JWT auth + roles, declarative query, CSS styling
-// (external stylesheet + inline style block), and multilingual keywords.
+// (external stylesheet + inline style block), multilingual keywords, and
+// multilingual content (interface text + a translated data field).
 
 application Boutique {
   nom: "Boutique NOVA"
@@ -9,8 +11,23 @@ application Boutique {
   css: "theme.css"
 }
 
+// Textes d'interface traduits, référencés par clé depuis un `titre` de page
+// (voir `page Produits` ci-dessous) — les 6 langues du DSL sont requises
+// pour chaque entrée.
+traductions {
+  titre_catalogue {
+    fr: "Catalogue"
+    en: "Catalog"
+    es: "Catálogo"
+    de: "Katalog"
+    it: "Catalogo"
+    pt: "Catálogo"
+  }
+}
+
 entité Produit {
   champ nom: chaine requis
+  champ description: texte multilingue
   champ prix: decimal
   champ stock: entier
   champ photo: image
@@ -39,7 +56,7 @@ requete ProduitsChers sur Produit {
 }
 
 page Produits {
-  afficher Produit comme table titre "Catalogue" style {
+  afficher Produit comme table titre titre_catalogue style {
     couleur_fond: "#445566"
     classe: "carte-produit"
   }

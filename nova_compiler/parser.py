@@ -66,13 +66,15 @@ class _NovaTransformer(Transformer):
         return kw.TYPES.get(text, text)  # sinon: référence à une autre entité
 
     def modifier(self, *parts):
-        # ("required",) | ("unique",) | ("default", value) | ("pattern", regex)
+        # ("required",) | ("unique",) | ("multilingual",) | ("default", value) | ("pattern", regex)
         if len(parts) == 1:
             key = str(parts[0])
             if key in kw.REQUIRED_WORDS:
                 return ("required", True)
             if key in kw.UNIQUE_WORDS:
                 return ("unique", True)
+            if key in kw.MULTILINGUAL_WORDS:
+                return ("multilingual", True)
         else:
             first_key = str(parts[0])
             if first_key in kw.PATTERN_WORDS:
@@ -91,6 +93,8 @@ class _NovaTransformer(Transformer):
                 f.default = val
             elif key == "pattern":
                 f.pattern = val
+            elif key == "multilingual":
+                f.multilingual = True
         return f
 
     def relation_decl(self, kw_tok, name_tok):
@@ -146,25 +150,38 @@ class _NovaTransformer(Transformer):
     def style_block(self, _kw_tok, *props):
         return dict(props)
 
+    def title_value(self, tok):
+        # `titre "Texte litteral"` (STRING, affiché tel quel dans toutes les
+        # langues) vs `titre cle_traduction` (NAME nu, référence une entrée
+        # du bloc `traductions { ... }`, résolue au moment de la génération —
+        # voir `_validate_translations` pour l'erreur si la clé n'existe pas).
+        text = str(tok)
+        if text.startswith('"'):
+            return ("literal", kw.strip_quotes(text))
+        return ("key", text)
+
     def page_stmt(self, _kw_tok, name_tok, *rest):
         mode = "table"
         title = None
+        title_key = None
         style: dict[str, str] = {}
         for r in rest:
             # Ignore les tokens de mot-clé eux-mêmes (AS_KW / TITLE_KW) : seuls
             # les enfants déjà résolus (display_mode -> str canonique, le
-            # token STRING du titre, ou le dict issu de style_block) nous
+            # tuple issu de title_value, ou le dict issu de style_block) nous
             # intéressent ici.
             tok_type = getattr(r, "type", None)
             if tok_type in ("AS_KW", "TITLE_KW"):
                 continue
-            if tok_type == "STRING":
-                title = kw.strip_quotes(str(r))
+            if isinstance(r, tuple) and r[0] == "literal":
+                title = r[1]
+            elif isinstance(r, tuple) and r[0] == "key":
+                title_key = r[1]
             elif isinstance(r, dict):
                 style = r
             elif isinstance(r, str) and r in ("table", "form", "card"):
                 mode = r
-        return PageShow(entity=str(name_tok), mode=mode, title=title, style=style)
+        return PageShow(entity=str(name_tok), mode=mode, title=title, title_key=title_key, style=style)
 
     def page_decl(self, _kw_tok, name_tok, *shows):
         return Page(name=str(name_tok), shows=list(shows))
@@ -315,6 +332,19 @@ class _NovaTransformer(Transformer):
                 cal.title_field = str(val)
         return cal
 
+    # ---- i18n (bloc `traductions { ... }`) ----------------------------------
+    def lang_prop(self, lang_tok, str_tok):
+        # Clé de langue NAME libre (`fr`/`en`/`es`/`de`/`it`/`pt`), validée
+        # en Python (kw.LANG_CODES) plutôt qu'un terminal Lark par langue —
+        # même raison que chart/email/calendar : voir grammar/nova.lark.
+        return (str(lang_tok), kw.strip_quotes(str(str_tok)))
+
+    def translation_entry(self, key_tok, *lang_props):
+        return (str(key_tok), dict(lang_props))
+
+    def translations_decl(self, _kw_tok, *entries):
+        return ("translations", dict(entries))
+
     # ---- programme -----------------------------------------------------
     def statement(self, stmt):
         return stmt
@@ -340,6 +370,12 @@ class _NovaTransformer(Transformer):
                 program.email = s
             elif isinstance(s, Calendar):
                 program.calendars.append(s)
+            elif isinstance(s, tuple) and s[0] == "translations":
+                # Plusieurs blocs `traductions { ... }` sont autorisés (fusion
+                # des dicts) ; une même clé redéclarée dans un second bloc
+                # écrase la première — pas d'erreur levée, comportement jugé
+                # suffisant pour ce MVP.
+                program.translations.update(s[1])
         return program
 
 
@@ -361,6 +397,8 @@ def parse_source(source: str) -> NovaProgram:
     _validate_charts(program)
     _validate_notifiers(program)
     _validate_calendars(program)
+    _validate_multilingual_fields(program)
+    _validate_translations(program)
     return program
 
 
@@ -435,6 +473,57 @@ def _validate_calendars(program: NovaProgram) -> None:
                     f"calendar '{cal.name}': le champ '{cal.title_field}' "
                     f"('champ_titre'/'title_field') n'existe pas sur l'entité "
                     f"'{cal.entity}'."
+                )
+
+
+def _validate_multilingual_fields(program: NovaProgram) -> None:
+    """Le modificateur `multilingue`/`multilingual` (voir `field_decl`) n'est
+    accepté que sur un champ `chaine`/`string` ou `texte`/`text` (les autres
+    types — nombre, date, fichier... — n'ont pas de sens à traduire), et ne
+    peut pas être combiné avec `requis`/`unique`/`motif` sur ce MVP : la
+    sémantique de "quelle langue est requise/unique" n'est pas définie —
+    plutôt que de deviner, on lève une erreur claire à la compilation (même
+    philosophie que les autres `_validate_*` de ce module)."""
+    for entity in program.entities:
+        for f in entity.fields:
+            if not f.multilingual:
+                continue
+            if f.type not in ("string", "text"):
+                raise NovaSyntaxError(
+                    f"entité '{entity.name}', champ '{f.name}': le modificateur "
+                    f"'multilingue'/'multilingual' n'est valide que sur un champ "
+                    f"'chaine'/'string' ou 'texte'/'text' (type actuel : '{f.type}')."
+                )
+            if f.required or f.unique or f.pattern:
+                raise NovaSyntaxError(
+                    f"entité '{entity.name}', champ '{f.name}': le modificateur "
+                    f"'multilingue'/'multilingual' ne peut pas être combiné avec "
+                    f"'requis'/'unique'/'motif' dans ce MVP."
+                )
+
+
+def _validate_translations(program: NovaProgram) -> None:
+    """Chaque entrée du bloc `traductions { ... }` doit fournir les 6 langues
+    du DSL (`keywords.LANG_CODES`) — pas de traduction manquante à découvrir
+    au runtime (page affichant une clé au lieu d'un texte). Chaque `titre
+    <cle>` référencé par un `page_stmt` (voir `title_value`/`page_stmt`)
+    doit correspondre à une entrée déclarée quelque part dans le fichier —
+    même philosophie que `_validate_charts`/`_validate_calendars` : une
+    faute de frappe dans la clé doit être détectée à `nova check`/`nova
+    compile`, jamais au premier chargement de la page."""
+    for key, texts in program.translations.items():
+        missing = [lang for lang in kw.LANG_CODES if lang not in texts]
+        if missing:
+            raise NovaSyntaxError(
+                f"traductions '{key}': langue(s) manquante(s) : {', '.join(missing)} "
+                f"(les 6 langues {', '.join(kw.LANG_CODES)} sont requises pour chaque clé)."
+            )
+    for page in program.pages:
+        for show in page.shows:
+            if show.title_key is not None and show.title_key not in program.translations:
+                raise NovaSyntaxError(
+                    f"page '{page.name}': titre '{show.title_key}' ne correspond à "
+                    f"aucune entrée déclarée dans un bloc 'traductions'/'translations'."
                 )
 
 

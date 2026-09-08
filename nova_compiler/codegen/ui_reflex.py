@@ -35,7 +35,7 @@ from __future__ import annotations
 import textwrap
 
 from ..ast_nodes import Calendar, Chart, NovaProgram, Page
-from ..keywords import STYLE_ALIASES, STYLE_CLASS_KEYS
+from ..keywords import LANG_CODES, STYLE_ALIASES, STYLE_CLASS_KEYS
 from .utils import to_ascii_identifier, to_pascal_case, to_snake_case, pluralize
 
 _HEADER = (
@@ -543,6 +543,114 @@ def _style_kwargs_src(style: dict[str, str]) -> str:
     return (", " + ", ".join(parts)) if parts else ""
 
 
+# ------------------------------------------------------------------ i18n ---
+# Bloc `traductions { ... }` (textes d'interface) + modificateur
+# `multilingue` sur un champ `chaine`/`texte` (données) : un état
+# `LangState` partagé (langue courante persistée en cookie, comme
+# `AuthState.token`), un sélecteur de langue dans la navbar, une fonction
+# `t_<cle>()` par entrée du bloc `traductions`, et le rendu table/carte/
+# formulaire des champs `multilingue`. Les textes/valeurs sont résolus via
+# `rx.match(LangState.lang, ...)` — une expression Reflex RÉACTIVE — plutôt
+# qu'un dict Python lu une fois à la génération : le texte affiché doit
+# changer immédiatement quand on bascule la langue via le sélecteur, sans
+# recharger la page.
+
+_LANG_STATE_TEMPLATE = '''\
+class LangState(rx.State):
+    """État de langue partagé (voir bloc `traductions {{ ... }}` et le
+    modificateur `multilingue` sur un champ) — persisté dans un cookie
+    navigateur, valable entre deux rechargements de page, comme le jeton
+    JWT de AuthState."""
+
+    lang: str = rx.Cookie("fr", name="nova_lang")
+
+    def set_lang(self, value: str) -> None:
+        self.lang = value
+'''
+
+
+def _generate_lang_state() -> str:
+    return _LANG_STATE_TEMPLATE
+
+
+def _lang_switcher_src() -> str:
+    return (
+        "rx.select(\n"
+        f"            {LANG_CODES!r},\n"
+        "            value=LangState.lang,\n"
+        "            on_change=LangState.set_lang,\n"
+        '            size="2",\n'
+        "        ),\n"
+    )
+
+
+def _translation_fn_name(key: str) -> str:
+    return f"t_{to_snake_case(key)}"
+
+
+def _generate_translation_helpers(program: NovaProgram) -> str:
+    """Une fonction Python par clé du bloc `traductions`, retournant une
+    expression `rx.match` réactive plutôt qu'un texte figé à la
+    génération."""
+    lines = []
+    for key, texts in program.translations.items():
+        fn_name = _translation_fn_name(key)
+        cases = ", ".join(f"({lang!r}, {texts[lang]!r})" for lang in LANG_CODES)
+        default = repr(texts["fr"])
+        lines.append(f"def {fn_name}():")
+        lines.append(f"    return rx.match(LangState.lang, {cases}, {default})")
+        lines.append("")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _title_expr_src(show, fallback: str) -> str:
+    """Expression Reflex (texte source, sans le rendre entre guillemets)
+    pour le titre d'une page : soit un appel à la fonction de traduction
+    générée (`titre <cle>` -> `t_<cle>()`), soit une chaîne littérale
+    entre guillemets (`titre "texte"`, ou titre absent -> nom de la
+    page/du show, comportement inchangé par rapport à avant l'ajout de
+    l'i18n)."""
+    if show is not None and show.title_key:
+        return f"{_translation_fn_name(show.title_key)}()"
+    text = (show.title if show is not None else None) or fallback
+    return f'"{text}"'
+
+
+def _multilingual_display_expr(f, row_var: str = "row") -> str:
+    """Expression Reflex affichant la valeur d'un champ `multilingue` dans
+    la langue actuellement sélectionnée — une colonne par langue en base
+    (voir codegen/api_fastapi.py), résolue avec `rx.match` (repli sur le
+    français si `LangState.lang` ne correspondait à aucune des 6 valeurs
+    attendues, ce qui ne devrait jamais arriver en pratique)."""
+    base = to_snake_case(f.name)
+    cases = ", ".join(f'("{lang}", {row_var}["{base}_{lang}"])' for lang in LANG_CODES)
+    return f'rx.match(LangState.lang, {cases}, {row_var}["{base}_fr"])'
+
+
+def _multilingual_form_block_src(state_cls: str, f) -> str:
+    """Bloc de formulaire pour un champ `multilingue` : un `rx.input` par
+    langue, labellisé `<champ> (fr)`/`<champ> (en)`/..., chacun lié à sa
+    propre variable de state `new_<champ>_<lang>` — même pattern de
+    setters explicites que les champs simples (voir
+    `_generate_state_and_view`), pour la même raison (fiabilité variable
+    des setters auto-générés selon la version de Reflex installée)."""
+    base = to_snake_case(f.name)
+    blocks = []
+    for lang in LANG_CODES:
+        var_name = f"new_{base}_{lang}"
+        blocks.append(
+            "    rx.vstack(\n"
+            f'        rx.text("{f.name} ({lang})", size="2", weight="bold", color_scheme="gray"),\n'
+            f'        rx.input(placeholder="{f.name} ({lang})", value={state_cls}.{var_name}, '
+            f'on_change={state_cls}.set_{var_name}, size="3", width="100%"),\n'
+            '        spacing="1",\n'
+            '        width="100%",\n'
+            "    ),"
+        )
+    return "\n".join(blocks)
+
+
 # ----------------------------------------------------------------- auth ---
 
 _AUTH_STATE_TEMPLATE = '''\
@@ -621,7 +729,7 @@ def _generate_login_page() -> str:
     return "def connexion_page() -> rx.Component:\n" + _wrap_page_body(inner, "None", "420px")
 
 
-def _generate_navbar(program: NovaProgram, has_auth: bool) -> str:
+def _generate_navbar(program: NovaProgram, has_auth: bool, has_i18n: bool = False) -> str:
     app_title = program.app.name if program.app else "NOVA App"
     links = "\n".join(
         f'        rx.link("{p.name}", href="{_page_route(p)}", size="3", weight="medium", '
@@ -651,6 +759,7 @@ def _generate_navbar(program: NovaProgram, has_auth: bool) -> str:
             '            rx.link(rx.button("Connexion / Log in", size="2"), href="/connexion"),\n'
             "        ),\n"
         )
+    lang_switcher = f"        {_lang_switcher_src()}" if has_i18n else ""
     return (
         "def nova_navbar() -> rx.Component:\n"
         '    """Barre de navigation partagée entre toutes les pages générées."""\n'
@@ -658,6 +767,7 @@ def _generate_navbar(program: NovaProgram, has_auth: bool) -> str:
         f'        rx.heading("{app_title}", size="5", weight="bold"),\n'
         "        rx.spacer(),\n"
         f"{links}\n"
+        f"{lang_switcher}"
         f"{auth_links}"
         "        align=\"center\",\n"
         "        width=\"100%\",\n"
@@ -713,7 +823,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
     entity = program.get_entity(show.entity)
     state_cls = _state_class_name(page)
     table_url_path = to_snake_case(pluralize(to_ascii_identifier(show.entity)))
-    title = show.title or page.name
+    title_expr = _title_expr_src(show, page.name)
     fields = entity.fields if entity else []
     api = _api_for_entity(program, show.entity)
     is_protected = bool(has_auth and api and api.protected_role)
@@ -726,7 +836,12 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         "    is_loading: bool = False",
     ]
     for f in fields:
-        state_lines.append(f'    new_{to_snake_case(f.name)}: str = ""')
+        snake = to_snake_case(f.name)
+        if f.multilingual:
+            for lang in LANG_CODES:
+                state_lines.append(f'    new_{snake}_{lang}: str = ""')
+        else:
+            state_lines.append(f'    new_{snake}: str = ""')
 
     if show.mode == "form":
         # Setters explicites : ne pas compter sur les setters `set_<var>`
@@ -736,8 +851,13 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         # Un setter écrit explicitement fonctionne quelle que soit la version.
         for f in fields:
             snake = to_snake_case(f.name)
-            state_lines.append(f"    def set_new_{snake}(self, value: str) -> None:")
-            state_lines.append(f"        self.new_{snake} = value")
+            if f.multilingual:
+                for lang in LANG_CODES:
+                    state_lines.append(f"    def set_new_{snake}_{lang}(self, value: str) -> None:")
+                    state_lines.append(f"        self.new_{snake}_{lang} = value")
+            else:
+                state_lines.append(f"    def set_new_{snake}(self, value: str) -> None:")
+                state_lines.append(f"        self.new_{snake} = value")
         # Champs `file`/`image` : pas de setter texte, un gestionnaire
         # d'upload à la place (voir `_upload_handler_state_lines`).
         for f in fields:
@@ -767,7 +887,14 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         "",
     ]
     if show.mode == "form":
-        payload_items = ", ".join(f'"{to_snake_case(f.name)}": self.new_{to_snake_case(f.name)}' for f in fields)
+        payload_parts = []
+        for f in fields:
+            snake = to_snake_case(f.name)
+            if f.multilingual:
+                payload_parts += [f'"{snake}_{lang}": self.new_{snake}_{lang}' for lang in LANG_CODES]
+            else:
+                payload_parts.append(f'"{snake}": self.new_{snake}')
+        payload_items = ", ".join(payload_parts)
         redirect_route = _table_route_for_entity(program, show.entity)
         state_lines += ["    async def submit(self):"]
         state_lines += auth_header_lines
@@ -776,7 +903,12 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
             f'            await client.post(f"{{BACKEND_URL}}/{table_url_path}/", json={{{payload_items}}}{headers_kwarg})',
         ]
         for f in fields:
-            state_lines.append(f'        self.new_{to_snake_case(f.name)} = ""')
+            snake = to_snake_case(f.name)
+            if f.multilingual:
+                for lang in LANG_CODES:
+                    state_lines.append(f'        self.new_{snake}_{lang} = ""')
+            else:
+                state_lines.append(f'        self.new_{snake} = ""')
         if redirect_route:
             # On revient sur le tableau qui liste cette entité une fois
             # l'enregistrement créé, plutôt que de rester sur le formulaire.
@@ -793,6 +925,8 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         header_cells = ", ".join(f'rx.table.column_header_cell("{f.name}")' for f in fields)
 
         def _table_cell_src(f) -> str:
+            if f.multilingual:
+                return f"rx.table.cell({_multilingual_display_expr(f)})"
             access = f"row['{to_snake_case(f.name)}']"
             return f"rx.table.cell({_field_value_src(f, access, access)})"
 
@@ -806,7 +940,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         inner = (
             "rx.vstack(\n"
             "    rx.hstack(\n"
-            f'        rx.heading("{title}", size="7"),\n'
+            f'        rx.heading({title_expr}, size="7"),\n'
             "        rx.spacer(),\n"
             f"        {create_link}\n"
             '        width="100%",\n'
@@ -834,6 +968,9 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         field_blocks = []
         for f in fields:
             snake = to_snake_case(f.name)
+            if f.multilingual:
+                field_blocks.append(_multilingual_form_block_src(state_cls, f))
+                continue
             if f.type in _UPLOAD_FIELD_TYPES:
                 field_blocks.append(_upload_form_block_src(state_cls, f))
                 continue
@@ -852,7 +989,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         inner = (
             "rx.card(\n"
             "    rx.vstack(\n"
-            f'        rx.heading("{title}", size="7"),\n'
+            f'        rx.heading({title_expr}, size="7"),\n'
             f"{fields_src}\n"
             f'        rx.button("Enregistrer / Save", on_click={state_cls}.submit, size="3", '
             'width="100%", color_scheme="violet"),\n'
@@ -867,6 +1004,8 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
     else:  # card
 
         def _card_value_src(f) -> str:
+            if f.multilingual:
+                return f"rx.text({_multilingual_display_expr(f)})"
             access = f"row['{to_snake_case(f.name)}']"
             default_src = f'rx.text(f"{f.name}: {{{access}}}")'
             return _field_value_src(f, access, default_src)
@@ -874,7 +1013,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         card_rows = ", ".join(_card_value_src(f) for f in fields)
         inner = (
             "rx.vstack(\n"
-            f'    rx.heading("{title}", size="7"),\n'
+            f'    rx.heading({title_expr}, size="7"),\n'
             "    rx.grid(\n"
             f"        rx.foreach({state_cls}.rows, lambda row: rx.card(\n"
             f"            rx.vstack({card_rows}, spacing=\"2\"),\n"
@@ -901,6 +1040,9 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
     pkg = _app_pkg_name(program)
     app_title = program.app.name if program.app else "NOVA App"
     has_auth = program.auth is not None and program.auth.enabled
+    has_i18n = bool(program.translations) or any(
+        f.multilingual for e in program.entities for f in e.fields
+    )
     css_path = program.app.props.get("css") if program.app else None
     css_basename = css_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] if css_path else None
 
@@ -932,9 +1074,16 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         "",
     ]
 
-    if program.pages or program.charts or program.calendars or has_auth:
-        lines.append(_generate_navbar(program, has_auth))
+    if program.pages or program.charts or program.calendars or has_auth or has_i18n:
+        lines.append(_generate_navbar(program, has_auth, has_i18n))
         lines.append("")
+
+    if has_i18n:
+        lines.append(_generate_lang_state())
+        lines.append("")
+        translation_helpers = _generate_translation_helpers(program)
+        if translation_helpers:
+            lines.append(translation_helpers)
 
     if has_auth:
         lines.append(_generate_auth_state(program))

@@ -464,6 +464,61 @@ calendrier Ajouts sur Produit {
   d'événement directement depuis le calendrier) — utilisez la page
   `formulaire` de l'entité pour ajouter un enregistrement.
 
+### Contenu multilingue (`traductions` + champ `multilingue`)
+
+Deux mécanismes complémentaires, tous deux couvrant **toujours les 6
+langues du DSL** (pas de sous-ensemble configurable par projet dans ce
+MVP), avec un **sélecteur de langue** ajouté automatiquement à la barre
+de navigation (langue courante persistée dans un cookie navigateur,
+comme le jeton JWT) :
+
+**Textes d'interface** (titres, libellés...) : un bloc `traductions { ...
+}` centralisé, référencé par clé depuis n'importe quel `titre`/`title` de
+`show` :
+
+```
+traductions {
+  titre_catalogue {
+    fr: "Catalogue"
+    en: "Catalog"
+    es: "Catálogo"
+    de: "Katalog"
+    it: "Catalogo"
+    pt: "Catálogo"
+  }
+}
+
+page Produits {
+  afficher Produit comme table titre titre_catalogue
+}
+```
+
+Les 6 langues (`fr`/`en`/`es`/`de`/`it`/`pt`) sont **requises** pour
+chaque entrée — une langue manquante est détectée à la compilation, pas
+au premier affichage de la page. `titre "Texte littéral"` (entre
+guillemets) reste disponible en parallèle et affiche le même texte quelle
+que soit la langue choisie, comme avant cette fonctionnalité.
+
+**Champ de donnée traduit** : le modificateur `multilingue`/`multilingual`
+sur un champ `chaine`/`texte` (uniquement — pas de sens sur un nombre,
+une date...) :
+
+```
+entité Produit {
+  champ nom: chaine requis
+  champ description: texte multilingue
+}
+```
+
+Génère **une colonne par langue** en base (`description_fr` ...
+`description_pt`, toutes optionnelles) plutôt qu'une table de traduction
+séparée — le choix le plus simple à interroger/migrer pour un MVP.
+Le formulaire généré affiche **un champ de saisie par langue** ; les vues
+table/carte affichent la valeur de la langue actuellement sélectionnée
+(recalculée immédiatement au changement de langue, sans rechargement de
+page). Ne peut pas être combiné avec `requis`/`unique`/`motif` dans ce
+MVP (détecté à la compilation).
+
 ### Aller au-delà du DSL : points d'extension "custom"
 
 Le DSL couvre le CRUD et l'UI simples. Pour tout le reste — requêtes
@@ -507,23 +562,26 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-75 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+89 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
 validité syntaxique du code généré, clés étrangères, setters de
 formulaire Reflex, validation regex, style CSS, graphiques (`chart`,
 4 types, source entité/requête), champs riches `fichier`/`image`/
 `couleur` (upload, pickers natifs, rendu tableau/carte enrichi),
 notifications email (`email` + `notifier:`), calendrier (`calendar`,
 résolution du champ date par défaut, alias multilingues, cas d'erreur),
-points d'extension custom — dont plusieurs tests qui **importent
-réellement** le backend et le frontend générés (pas seulement une
-vérification de syntaxe) : flux JWT complet (inscription, connexion,
-rôles, routes protégées) et route de requête déclarative via
-`TestClient`, upload de fichier réel servi par le montage statique,
-notification email envoyée sur create/delete (connexion SMTP simulée,
-reste du code réellement exécuté) et échec SMTP n'interrompant jamais
-la requête, et construction effective de l'arbre de composants Reflex
-de chaque page (graphique, calendrier avec grille de jours calculée
-côté serveur, formulaire avec zone d'upload, carte).
+contenu multilingue (`traductions`, champ `multilingue`, alias dans les
+6 langues, cas d'erreur), points d'extension custom — dont plusieurs
+tests qui **importent réellement** le backend et le frontend générés
+(pas seulement une vérification de syntaxe) : flux JWT complet
+(inscription, connexion, rôles, routes protégées) et route de requête
+déclarative via `TestClient`, upload de fichier réel servi par le
+montage statique, notification email envoyée sur create/delete
+(connexion SMTP simulée, reste du code réellement exécuté) et échec
+SMTP n'interrompant jamais la requête, et construction effective de
+l'arbre de composants Reflex de chaque page (graphique, calendrier
+avec grille de jours calculée côté serveur, formulaire avec zone
+d'upload, carte, sélecteur de langue et fonction de traduction
+réactive `t_<cle>()`).
 
 ### Limites connues du MVP
 
@@ -555,9 +613,10 @@ côté serveur, formulaire avec zone d'upload, carte).
   création/déplacement d'événement par glisser-déposer directement sur
   la grille, pas de vue semaine/jour) ; pour une interaction plus riche,
   `frontend/<app>/custom.py`.
-- Pas de contenu ou de texte d'interface multilingue au runtime (langue
-  du site fixée par `application { langue: ... }`) — phase prévue mais
-  pas encore livrée.
+- Le contenu multilingue (`traductions`, champ `multilingue`) couvre
+  toujours les 6 langues du DSL (pas de sous-ensemble configurable par
+  projet) ; pas de traduction assistée/automatique — chaque texte est
+  saisi à la main dans le fichier `.nova`.
 - Pas encore de NOVA Studio (IDE dédié), Marketplace, NOVA Cloud, NOVA AI
   — ce dépôt couvre le compilateur (Phase 1/2 de la feuille de route).
 
@@ -934,6 +993,58 @@ calendar Additions on Product {
   from the calendar grid) — use the entity's `form` page to add a
   record.
 
+### Multilingual content (`translations` + `multilingual` field)
+
+Two complementary mechanisms, both **always covering all 6 DSL
+languages** (no project-configurable subset in this MVP), with a
+**language switcher** automatically added to the navigation bar (current
+language persisted in a browser cookie, same as the JWT token):
+
+**Interface text** (titles, labels...): a centralized `translations { ...
+}` block, referenced by key from any `show`'s `title`:
+
+```
+translations {
+  catalog_title {
+    fr: "Catalogue"
+    en: "Catalog"
+    es: "Catálogo"
+    de: "Katalog"
+    it: "Catalogo"
+    pt: "Catálogo"
+  }
+}
+
+page Products {
+  show Product as table title catalog_title
+}
+```
+
+All 6 languages (`fr`/`en`/`es`/`de`/`it`/`pt`) are **required** for
+every entry — a missing language is caught at compile time, not on the
+page's first render. `title "Literal text"` (quoted) is still available
+alongside it and displays the same text regardless of the selected
+language, as before this feature.
+
+**Translated data field**: the `multilingual`/`multilingue` modifier on
+a `string`/`text` field (only — doesn't make sense on a number, a
+date...):
+
+```
+entity Product {
+  field name: string required
+  field description: text multilingual
+}
+```
+
+Generates **one column per language** in the database
+(`description_fr` ... `description_pt`, all optional) rather than a
+separate translation table — the simplest choice to query/migrate for
+an MVP. The generated form shows **one input per language**; table/card
+views display the value in the currently selected language (recomputed
+immediately on language change, no page reload). Cannot be combined
+with `required`/`unique`/`pattern` in this MVP (caught at compile time).
+
 ### Beyond the DSL: "custom" extension points
 
 The DSL covers simple CRUD and UI. For everything else — complex
@@ -977,22 +1088,25 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-75 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+89 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
 generated-code syntactic validity, foreign keys, explicit Reflex form
 setters, regex validation, CSS styling, charts (`chart`, 4 types,
 entity/query source), rich `file`/`image`/`color` fields (upload,
 native pickers, enriched table/card rendering), email notifications
 (`email` + `notifier:`), calendar (`calendar`, default date-field
-resolution, multilingual aliases, error cases), custom extension
-points — including several tests that **actually import** the
-generated backend and frontend (not just a syntax check): a full JWT
-flow (register, login, roles, protected routes) and the
-declarative-query route via `TestClient`, a real file upload served
-back by the static mount, an email notification actually sent on
-create/delete (SMTP connection itself mocked, everything else real
-code) and a send failure that never breaks the request, and actually
-building the Reflex component tree of every page (chart, calendar with
-its server-computed day grid, form with an upload zone, card).
+resolution, multilingual aliases, error cases), multilingual content
+(`translations`, `multilingual` field, 6-language aliases, error
+cases), custom extension points — including several tests that
+**actually import** the generated backend and frontend (not just a
+syntax check): a full JWT flow (register, login, roles, protected
+routes) and the declarative-query route via `TestClient`, a real file
+upload served back by the static mount, an email notification actually
+sent on create/delete (SMTP connection itself mocked, everything else
+real code) and a send failure that never breaks the request, and
+actually building the Reflex component tree of every page (chart,
+calendar with its server-computed day grid, form with an upload zone,
+card, language switcher, and the reactive `t_<key>()` translation
+function).
 
 ### Known MVP limitations
 
@@ -1025,9 +1139,10 @@ its server-computed day grid, form with an upload zone, card).
 - The `calendar` block is a read-only monthly view (no drag-and-drop
   event creation/moving directly on the grid, no week/day view); for
   richer interaction, `frontend/<app>/custom.py`.
-- No multilingual site content or UI text at runtime yet (site language
-  fixed by `app { language: ... }`) — planned but not yet delivered
-  phase.
+- Multilingual content (`translations`, `multilingual` field) always
+  covers all 6 DSL languages (no project-configurable subset); no
+  machine/assisted translation — every text is hand-entered in the
+  `.nova` file.
 - Not yet included: NOVA Studio (dedicated IDE), Marketplace, NOVA
   Cloud, NOVA AI — this repo covers the compiler (roadmap Phase 1/2).
 

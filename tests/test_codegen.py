@@ -535,9 +535,11 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
 
     Regroupe aussi la vérification des pages `formulaire`/`carte` sur les
     champs riches (`image`/`fichier`/`couleur`/`booleen` ajoutés à `entité
-    Produit` dans full_featured.nova) et de la page `calendrier` (`calendrier
+    Produit` dans full_featured.nova), de la page `calendrier` (`calendrier
     Ajouts sur Produit { champ_date: date_ajout ... }`, ajoutée pour la même
-    raison) : `rx.App()` est un singleton process-wide chez Reflex
+    raison), et du contenu multilingue (`traductions { titre_catalogue {
+    ... } }` + `champ description: texte multilingue` sur `entité Produit`,
+    ajoutés pour la même raison) : `rx.App()` est un singleton process-wide chez Reflex
     (`ReflexRuntimeError: A RegistrationContext can only be associated with
     a single App instance`), donc un second test important un second module
     frontend généré échouerait s'il tournait à côté de celui-ci — même
@@ -588,6 +590,18 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
         first_of_month = next(d for d in state.days if d["day"] == 1 and d["in_month"])
         assert first_of_month["events_text"] == "Chaise"
         assert all(set(d.keys()) == {"date", "day", "in_month", "events_text"} for d in state.days)
+        # Contenu multilingue : `LangState` + fonction de traduction générée
+        # pour `titre_catalogue`, et champ `description` (multilingue) sur
+        # `entité Produit` porté par 6 state vars sur la page formulaire.
+        assert main.LangState is not None
+        assert main.t_titre_catalogue() is not None
+        lang_state = main.LangState()
+        assert lang_state.lang == "fr"
+        form_state = main.NouveauProduitState()
+        for lang in ("fr", "en", "es", "de", "it", "pt"):
+            assert getattr(form_state, f"new_description_{lang}") == ""
+        table_page = main.produits_page()
+        assert type(table_page).__name__ == "Box"
     finally:
         sys.path.remove(frontend_dir)
         for mod_name in [m for m in sys.modules if m == pkg_name or m.startswith(pkg_name + ".")]:
@@ -1048,6 +1062,115 @@ def test_calendar_not_generated_without_calendar_block(tmp_path):
     assert "CalendarState" not in source
     assert "import calendar" not in source
     assert "from datetime import date" not in source
+
+
+# ------------------------------------------------------------------ i18n ---
+# Bloc `traductions { ... }` (textes d'interface) + modificateur
+# `multilingue`/`multilingual` sur un champ `chaine`/`texte` (données) :
+# `LangState` (langue courante, cookie), sélecteur de langue dans la
+# navbar, une fonction `t_<cle>()` par entrée de `traductions`, et le
+# rendu table/carte/formulaire des champs multilingues via `rx.match`
+# (colonnes `<champ>_fr`...`<champ>_pt` côté backend).
+
+_I18N_NOVA = """
+app Boutique {
+  name: "Boutique"
+}
+
+translations {
+  accueil_titre {
+    fr: "Bienvenue"
+    en: "Welcome"
+    es: "Bienvenido"
+    de: "Willkommen"
+    it: "Benvenuto"
+    pt: "Bem-vindo"
+  }
+}
+
+entity Produit {
+  field nom: string required
+  field titre: string multilingual
+}
+
+api Produit {
+  list
+  create
+}
+
+page Accueil {
+  show Produit as table title accueil_titre
+}
+
+page NouveauProduit {
+  show Produit as form
+}
+
+page Fiches {
+  show Produit as card
+}
+"""
+
+
+def test_multilingual_backend_generates_one_column_per_language(tmp_path):
+    program = parse_source(_I18N_NOVA)
+    generate_project(program, tmp_path)
+    models_src = (tmp_path / "backend/app/models.py").read_text(encoding="utf-8")
+    for lang in ("fr", "en", "es", "de", "it", "pt"):
+        assert f"titre_{lang}: Optional[str]" in models_src
+    # Le champ `nom` (non multilingue) reste une colonne unique.
+    assert "nom: str" in models_src or "nom: Optional[str]" in models_src
+
+
+def test_translations_block_generates_lang_state_and_translation_function(tmp_path):
+    program = parse_source(_I18N_NOVA)
+    generate_project(program, tmp_path)
+    source = _frontend_main_source(tmp_path)
+
+    assert "class LangState(rx.State):" in source
+    assert 'lang: str = rx.Cookie("fr", name="nova_lang")' in source
+    assert "def t_accueil_titre():" in source
+    assert "rx.match(LangState.lang," in source
+    assert "('fr', 'Bienvenue')" in source
+    assert "('pt', 'Bem-vindo')" in source
+    # Sélecteur de langue dans la navbar.
+    assert "value=LangState.lang" in source
+    assert "on_change=LangState.set_lang" in source
+    # Le titre de la page `Accueil` (`titre accueil_titre`) appelle la
+    # fonction de traduction plutôt qu'une chaîne littérale figée.
+    assert 'rx.heading(t_accueil_titre(), size="7")' in source
+
+
+def test_multilingual_field_generates_six_state_vars_and_form_inputs(tmp_path):
+    program = parse_source(_I18N_NOVA)
+    generate_project(program, tmp_path)
+    source = _frontend_main_source(tmp_path)
+
+    for lang in ("fr", "en", "es", "de", "it", "pt"):
+        assert f'new_titre_{lang}: str = ""' in source
+        assert f"def set_new_titre_{lang}(self, value: str) -> None:" in source
+        assert f'placeholder="titre ({lang})"' in source
+        assert f'"titre_{lang}": self.new_titre_{lang}' in source
+
+
+def test_multilingual_field_rendered_via_reactive_match_in_table_and_card(tmp_path):
+    program = parse_source(_I18N_NOVA)
+    generate_project(program, tmp_path)
+    source = _frontend_main_source(tmp_path)
+
+    assert 'rx.match(LangState.lang, ("fr", row["titre_fr"])' in source
+    assert 'row["titre_pt"])' in source
+
+
+def test_i18n_not_generated_without_translations_or_multilingual_field(tmp_path):
+    """Régression : un projet sans bloc `traductions` ni champ `multilingue`
+    (ex. blog.en.nova) ne doit générer ni `LangState`, ni sélecteur de
+    langue, ni fonction de traduction."""
+    program = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(program, tmp_path)
+    source = _frontend_main_source(tmp_path)
+    assert "LangState" not in source
+    assert "value=LangState.lang" not in source
 
 
 # NB : la vérification d'exécution réelle (import du module Reflex généré +

@@ -87,6 +87,16 @@ UNIQUE_WORDS = {"unique", "unico", "único", "eindeutig"}
 PATTERN_WORDS = {
     "pattern", "motif", "regex", "patron", "patrón", "muster", "modello", "formato",
 }
+MULTILINGUAL_WORDS = {
+    "multilingual", "multilingue", "multilingüe", "mehrsprachig", "multilingua", "multilíngue",
+}
+
+# ---- bloc `traductions { ... }` (textes d'interface multilingues) --------
+# Les 6 langues du DSL, dans un ordre canonique réutilisé partout où une
+# liste ordonnée est nécessaire : suffixes de colonnes générées pour un
+# champ `multilingue` (voir codegen/api_fastapi.py), cas du sélecteur de
+# langue et des fonctions `t_<cle>()` générées (voir codegen/ui_reflex.py).
+LANG_CODES = ["fr", "en", "es", "de", "it", "pt"]
 
 # ---- alias de propriétés de style (bloc `style { ... }`) -----------------
 # Un alias bilingue pratique pour les propriétés CSS les plus courantes ;
