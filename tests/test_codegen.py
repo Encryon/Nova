@@ -459,3 +459,101 @@ def test_docker_compose_includes_jwt_secret_only_when_auth_enabled(tmp_path):
     # ligne JWT injectée (pas de ligne vide parasite avant le prochain
     # champ, ce qui casserait l'indentation YAML).
     assert "NOVA_DATABASE_URL: sqlite:///./nova.db\n    volumes:" in compose
+
+
+# ----------------------------------------------------------------- chart ---
+
+
+def _frontend_main_source(tmp_path) -> str:
+    frontend_files = [
+        f
+        for f in (tmp_path / "frontend").rglob("*.py")
+        if f.name not in ("rxconfig.py", "__init__.py", "custom.py")
+    ]
+    assert frontend_files, "fichier frontend principal introuvable"
+    return frontend_files[0].read_text(encoding="utf-8")
+
+
+def test_chart_on_entity_generates_recharts_bar_and_route(tmp_path):
+    program = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(program, tmp_path, source_dir=EXAMPLES)
+    source = _frontend_main_source(tmp_path)
+
+    # Graphique sur l'entité Produit (protégée) : bar chart, en-tête auth.
+    assert "class RepartitionPrixChartState(rx.State):" in source
+    assert 'rx.recharts.bar_chart(' in source
+    assert 'rx.recharts.bar(data_key="prix", fill=' in source
+    assert 'rx.recharts.x_axis(data_key="nom")' in source
+    assert 'resp = await client.get(f"{BACKEND_URL}/produits/", headers=headers)' in source
+    assert 'app.add_page(repartition_prix_chart_page, route="/graphiques/repartition-prix"' in source
+
+
+def test_chart_on_query_generates_pie_and_uses_unprotected_query_route(tmp_path):
+    program = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(program, tmp_path, source_dir=EXAMPLES)
+    source = _frontend_main_source(tmp_path)
+
+    # Graphique sur la requête ProduitsChers : camembert -> pie, source
+    # `/requetes/produits-chers` jamais protégée (voir _generate_query_router).
+    assert "class TopProduitsChersChartState(rx.State):" in source
+    assert "rx.recharts.pie_chart(" in source
+    assert 'rx.recharts.pie(data=TopProduitsChersChartState.rows, data_key="prix", name_key="nom"' in source
+    assert 'resp = await client.get(f"{BACKEND_URL}/requetes/produits-chers")' in source
+    # Pas d'en-tête Authorization pour une requête (toujours publique).
+    query_chart_state = source.split("class TopProduitsChersChartState(rx.State):")[1].split("class ")[0]
+    assert "headers" not in query_chart_state
+
+
+def test_chart_types_line_and_area_generate_expected_recharts_components():
+    from nova_compiler.codegen.ui_reflex import generate_frontend
+
+    src = """
+    entity Mesure {
+        field jour: string required
+        field valeur: float required
+    }
+    chart Ligne sur Mesure { type: line axe_x: jour axe_y: valeur }
+    chart Aire sur Mesure { type: area axe_x: jour axe_y: valeur }
+    """
+    program = parse_source(src)
+    files = generate_frontend(program)
+    main_src = next(v for k, v in files.items() if k.endswith(".py") and "custom" not in k and "rxconfig" not in k)
+    assert "rx.recharts.line_chart(" in main_src
+    assert 'rx.recharts.line(data_key="valeur", stroke=' in main_src
+    assert "rx.recharts.area_chart(" in main_src
+    assert 'rx.recharts.area(data_key="valeur", fill=' in main_src
+
+
+def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
+    """Comme `test_generated_backend_actually_imports_and_wires_custom_router`,
+    mais côté frontend : importe réellement le module Reflex généré (pas
+    seulement une validation de syntaxe `ast.parse`) et appelle chaque
+    fonction de page de graphique pour vérifier que l'arbre de composants
+    `rx.recharts` se construit sans erreur — la seule façon de détecter un
+    problème de signature d'API Reflex (voir leçon apprise en développant
+    ce générateur : `data=` se pose différemment sur `pie` que sur les
+    autres types)."""
+    program = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(program, tmp_path, source_dir=EXAMPLES)
+
+    frontend_dir = str(tmp_path / "frontend")
+    pkg_dir = next(
+        p for p in (tmp_path / "frontend").iterdir() if p.is_dir() and (p / "custom.py").exists()
+    )
+    pkg_name = pkg_dir.name
+
+    sys.path.insert(0, frontend_dir)
+    for mod_name in [m for m in sys.modules if m == pkg_name or m.startswith(pkg_name + ".")]:
+        del sys.modules[mod_name]
+    try:
+        main = importlib.import_module(f"{pkg_name}.{pkg_name}")
+        assert main.app is not None
+        # Un graphique par source (entité protégée + requête publique).
+        bar_page = main.repartition_prix_chart_page()
+        pie_page = main.top_produits_chers_chart_page()
+        assert type(bar_page).__name__ == "Box"
+        assert type(pie_page).__name__ == "Box"
+    finally:
+        sys.path.remove(frontend_dir)
+        for mod_name in [m for m in sys.modules if m == pkg_name or m.startswith(pkg_name + ".")]:
+            del sys.modules[mod_name]

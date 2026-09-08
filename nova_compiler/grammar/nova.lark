@@ -1,9 +1,8 @@
 // ============================================================================
 // NOVA DSL grammar — multilingual business-intent language.
-// Core block/type keywords exist in French, English, Spanish, German,
+// Every block/type keyword exists in French, English, Spanish, German,
 // Italian and Portuguese; every spelling compiles to the exact same AST
-// node, so a .nova file can freely mix languages. Newer blocks (style,
-// auth, requete/query) are bilingual FR/EN for now.
+// node, so a .nova file can freely mix languages.
 // ============================================================================
 
 start: statement*
@@ -14,6 +13,7 @@ statement: app_decl
          | page_decl
          | auth_decl
          | query_decl
+         | chart_decl
 
 // ---------------------------------------------------------------- app -----
 // Optional single block describing the application itself.
@@ -73,6 +73,23 @@ query_prop: FILTRE_KW ":" NAME COMPARATOR value
 
 value: STRING | NUMBER | BOOL_TRUE | BOOL_FALSE | NAME
 
+// -------------------------------------------------------------- chart -----
+// Graphique déclaratif : `sur <NAME>` référence soit une entité (les
+// données viennent alors de son API liste), soit un bloc `requete`/`query`
+// déjà déclaré (données filtrées/triées) — résolu au moment de la
+// génération, pas ici. Les propriétés (`type`, `axe_x`, `axe_y`, `titre`)
+// sont des NAME libres résolues via `keywords.CHART_PROP_ALIASES`, comme le
+// bloc `style`, plutôt que des mots-clés dédiés dans la grammaire.
+// NB : `chart_prop` utilise volontairement un non-terminal dédié
+// (`chart_value`) plutôt que le `value` générique utilisé par app_prop/
+// query_prop : le réutiliser ici créait un conflit LALR qui corrompait le
+// lexer contextuel ailleurs dans la grammaire (ex. `app { description: "x" }`
+// cessait de se parser) — bug réel rencontré et corrigé pendant le
+// développement de ce bloc `chart`.
+chart_decl: CHART_KW NAME SUR_KW NAME "{" chart_prop* "}"
+chart_prop: NAME ":" chart_value
+chart_value: STRING | NAME
+
 // ================================================== multilingual terminals ===
 APP_KW: "app" | "application" | "aplicacion" | "aplicación" | "anwendung" | "applicazione" | "aplicacao" | "aplicação"
 ENTITY_KW: "entity" | "entité" | "entite" | "entidad" | "entitaet" | "entität" | "entita" | "entità" | "entidade"
@@ -104,6 +121,8 @@ STYLE_KW: "style" | "css" | "estilo" | "stil" | "stile"
 AUTH_KW: "auth" | "authentification" | "authentication" | "autenticacion" | "autenticación" | "authentifizierung" | "autenticazione" | "autenticacao" | "autenticação"
 ROLES_KW: "roles" | "rôles" | "rollen" | "ruoli" | "papeis" | "papéis"
 DEFAULT_ROLE_KW: "role_par_defaut" | "role_par_défaut" | "default_role" | "rol_por_defecto" | "standardrolle" | "ruolo_predefinito" | "papel_padrao" | "papel_padrão"
+
+CHART_KW: "chart" | "graphique" | "grafico" | "gráfico" | "diagramm"
 
 QUERY_KW: "requete" | "requête" | "query" | "consulta" | "abfrage" | "interrogazione"
 SUR_KW: "sur" | "on" | "from" | "en" | "von" | "su" | "em"

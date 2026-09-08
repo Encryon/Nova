@@ -109,6 +109,43 @@ telle quelle.
 Comparateurs disponibles (identiques dans toutes les langues, ce sont des
 symboles) : `>`, `<`, `>=`, `<=`, `==`, `!=`.
 
+## Graphiques (bloc `chart <Nom> sur <Entité|Requête> { ... }`)
+
+| Mot-clé | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Bloc chart / Chart block | `graphique` | `chart` | `grafico` | `diagramm` | `grafico` | `gráfico` |
+| Sur (source) / On (source) | `sur` | `on` / `from` | `en` | `von` | `su` | `em` |
+
+Contrairement aux blocs `auth`/`query` ci-dessus, les propriétés à
+l'intérieur de `chart { ... }` (`type`, `axe_x`/`x`, `axe_y`/`y`,
+`titre`/`title`) ne sont **pas** des mots-clés de la grammaire mais des
+alias déclarés dans `keywords.CHART_PROP_ALIASES` (même mécanisme que
+`STYLE_ALIASES` pour le bloc `style`) :
+
+| Propriété | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Type de graphique / Chart type | `type` | `type` | `tipo` | `typ` | `tipo` | `tipo` |
+| Axe X / X axis | `axe_x` | `x` / `x_axis` | `eje_x` | `x_achse` | `asse_x` | `eixo_x` |
+| Axe Y / Y axis | `axe_y` | `y` / `y_axis` | `eje_y` | `y_achse` | `asse_y` | `eixo_y` |
+| Titre / Title | `titre` | `title` | `titulo` / `título` | `titel` | `titolo` | `titulo` / `título` |
+
+Valeurs possibles pour `type:` (alias déclarés dans `keywords.CHART_TYPES`) :
+
+| Type | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Barres / Bar | `barres` / `barre` | `bar` | `barra` / `barras` | `balken` | `barra` | `barra` / `barras` |
+| Ligne / Line | `ligne` | `line` | `linea` / `línea` | `linie` | `linea` | `linha` |
+| Camembert / Pie | `camembert` | `pie` | `tarta` / `circular` | `kreis` | `torta` / `pizza` | `torta` |
+| Aires / Area | `aire` | `area` | `área` | `flaeche` / `fläche` | `area` | `area` |
+
+`sur`/`on` référence soit une **entité** déclarée (données = son API
+liste, protection JWT héritée de `api <Entité> { proteger: <rôle> }` si
+présent), soit une **requête** (`requete`/`query`) déjà déclarée plus
+haut dans le fichier (données déjà filtrées/triées, route toujours
+publique). Une référence inconnue lève une erreur à la compilation
+(`chart X sur Y` où `Y` n'est ni une entité ni une requête déclarée),
+pas une page qui échoue silencieusement au premier chargement.
+
 ## Exemple : le même programme en 4 langues / Example: the same program in 4 languages
 
 ```
@@ -205,6 +242,14 @@ langues dans le même fichier, sont couverts par
 `tests/test_parser.py::test_auth_and_query_blocks_recognize_all_six_languages`
 et `test_style_and_css_prop_keywords_recognize_all_six_languages` — ils
 sont exécutés à chaque `pytest tests/ -v`, pas seulement documentés ici.
+
+Le bloc `chart` (mot-clé, types, alias de propriétés dans les 6 langues)
+est couvert par `test_chart_type_keyword_recognizes_all_six_languages`
+et `test_chart_keyword_and_prop_aliases_recognize_all_six_languages`
+dans le même fichier, ainsi que par un test qui **importe réellement**
+le frontend Reflex généré et construit l'arbre de composants de chaque
+page de graphique (`test_chart_frontend_module_actually_imports_and_builds_all_pages`
+dans `tests/test_codegen.py`).
 
 ---
 

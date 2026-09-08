@@ -39,3 +39,19 @@ page Produits {
     classe: "carte-produit"
   }
 }
+
+// Graphique sur l'entité (protégé, hérite de `api Produit { proteger: admin }`)
+chart RepartitionPrix sur Produit {
+  type: barres
+  axe_x: nom
+  axe_y: prix
+  titre: "Prix par produit"
+}
+
+// Graphique sur une requête déclarative (toujours public, voir _requetes.py)
+chart TopProduitsChers sur ProduitsChers {
+  type: camembert
+  axe_x: nom
+  axe_y: prix
+  titre: "Top produits chers"
+}

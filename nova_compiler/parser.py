@@ -10,7 +10,7 @@ from lark import Lark, Transformer, v_args
 from lark.exceptions import LarkError
 
 from . import keywords as kw
-from .ast_nodes import Api, App, Auth, Entity, Field, NovaProgram, Page, PageShow, Query, QueryFilter, Relation
+from .ast_nodes import Api, App, Auth, Chart, Entity, Field, NovaProgram, Page, PageShow, Query, QueryFilter, Relation
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar" / "nova.lark"
 
@@ -199,6 +199,39 @@ class _NovaTransformer(Transformer):
                 q.limit = val
         return q
 
+    # ---- chart -----------------------------------------------------------
+    def chart_value(self, tok):
+        # Non-terminal dédié (STRING | NAME) plutôt que le `value` générique
+        # (voir le commentaire dans grammar/nova.lark juste au-dessus de
+        # `chart_prop` : réutiliser `value` ici cassait le parsing ailleurs
+        # dans la grammaire à cause d'un conflit LALR).
+        text = str(tok)
+        return kw.strip_quotes(text) if text.startswith('"') else text
+
+    def chart_prop(self, key_tok, value):
+        # Comme le bloc `style` : la clé est un NAME libre résolu via un
+        # dict Python (kw.CHART_PROP_ALIASES), pas un terminal Lark dédié par
+        # langue — ça évite complètement le bug de comparaison texte-vs-type
+        # corrigé plus haut dans auth_prop/query_prop, puisqu'il n'y a pas de
+        # mot-clé de grammaire par langue à oublier ici.
+        key = kw.CHART_PROP_ALIASES.get(str(key_tok), str(key_tok))
+        if key == "type" and isinstance(value, str):
+            value = kw.CHART_TYPES.get(value, value)
+        return (key, value)
+
+    def chart_decl(self, _kw_tok, name_tok, _sur_tok, source_tok, *props):
+        chart = Chart(name=str(name_tok), source=str(source_tok))
+        for key, val in props:
+            if key == "type":
+                chart.type = val
+            elif key == "x":
+                chart.x_field = str(val)
+            elif key == "y":
+                chart.y_field = str(val)
+            elif key == "title":
+                chart.title = str(val)
+        return chart
+
     # ---- programme -----------------------------------------------------
     def statement(self, stmt):
         return stmt
@@ -218,6 +251,8 @@ class _NovaTransformer(Transformer):
                 program.auth = s
             elif isinstance(s, Query):
                 program.queries.append(s)
+            elif isinstance(s, Chart):
+                program.charts.append(s)
         return program
 
 
@@ -235,7 +270,25 @@ def parse_source(source: str) -> NovaProgram:
         tree = _parser.parse(source)
     except LarkError as exc:
         raise NovaSyntaxError(str(exc)) from exc
-    return _NovaTransformer().transform(tree)
+    program = _NovaTransformer().transform(tree)
+    _validate_charts(program)
+    return program
+
+
+def _validate_charts(program: NovaProgram) -> None:
+    """`chart <Nom> sur <X>` : X doit être une entité ou une requête déjà
+    déclarée. Contrairement à `query_decl` (pas de vérification équivalente
+    aujourd'hui), on valide ici explicitement : une faute de frappe dans
+    `sur` ne doit pas produire un projet généré qui échoue silencieusement
+    au runtime — leçon tirée du bug auth_prop/query_prop plus haut."""
+    known_entities = {e.name for e in program.entities}
+    known_queries = {q.name for q in program.queries}
+    for chart in program.charts:
+        if chart.source not in known_entities and chart.source not in known_queries:
+            raise NovaSyntaxError(
+                f"chart '{chart.name}': la source '{chart.source}' (après 'sur') "
+                f"ne correspond à aucune entité ni requête déclarée."
+            )
 
 
 def parse_file(path: str | Path) -> NovaProgram:

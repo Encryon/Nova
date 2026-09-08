@@ -10,7 +10,7 @@
 ![Statut](https://img.shields.io/badge/statut-fair--source%20/%20open-6e4bf0)
 ![Version](https://img.shields.io/badge/version-0.3.0-6e4bf0)
 ![Python](https://img.shields.io/badge/python-3.11%2B-6e4bf0)
-![Tests](https://img.shields.io/badge/tests-38%20passed-2f9e6e)
+![Tests](https://img.shields.io/badge/tests-47%20passed-2f9e6e)
 ![Licence](https://img.shields.io/badge/licence-BSL%201.1%20→%20Apache%202.0-a8630f)
 
 [🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Référence des mots-clés (6 langues)](docs/REFERENCE.md) · [Licence](#licence--license)
@@ -294,6 +294,44 @@ Génère `GET /requetes/produits-chers`, une requête SQLAlchemy lisible
 `!=`. Pour des filtres combinés, des jointures ou une logique plus
 riche, `routers_custom/` reste le point d'extension prévu.
 
+### Graphiques (`chart`)
+
+Un bloc `chart <Nom> sur <Entité|Requête> { ... }` génère automatiquement
+sa propre page Reflex (route `/graphiques/<nom>`, lien ajouté à la barre
+de navigation) affichant un graphique [Recharts](https://recharts.org/)
+— aucune dépendance Python supplémentaire à installer, `rx.recharts` est
+fourni avec Reflex :
+
+```
+chart RepartitionPrix sur Produit {
+  type: barres
+  axe_x: nom
+  axe_y: prix
+  titre: "Prix par produit"
+}
+```
+
+`sur` référence soit une **entité** (les données viennent alors de son
+API liste — protection JWT héritée automatiquement si `api <Entité> {
+... proteger: <rôle> }` est présent), soit une **requête déclarative**
+déjà définie plus haut dans le fichier (données déjà filtrées/triées,
+toujours publique) :
+
+```
+chart TopProduitsChers sur ProduitsChers {
+  type: camembert
+  axe_x: nom
+  axe_y: prix
+}
+```
+
+Types disponibles (`type:`) : `bar`/`barres`/`barra`/`balken`,
+`line`/`ligne`/`linea`/`linie`, `pie`/`camembert`/`torta`/`kreis`,
+`area`/`aire`/`área`/`fläche` — chacun avec ses synonymes dans les 6
+langues. Une référence `sur` inconnue (ni entité ni requête) est
+détectée à la compilation (`nova check`/`nova compile`), pas au
+premier chargement de la page.
+
 ### Aller au-delà du DSL : points d'extension "custom"
 
 Le DSL couvre le CRUD et l'UI simples. Pour tout le reste — requêtes
@@ -337,13 +375,15 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-38 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+47 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
 validité syntaxique du code généré, clés étrangères, setters de
-formulaire Reflex, validation regex, style CSS, points d'extension
-custom — dont plusieurs tests qui **importent réellement** le backend
-généré et lui envoient de vraies requêtes HTTP (`TestClient`) : flux JWT
-complet (inscription, connexion, rôles, routes protégées) et route de
-requête déclarative, pas seulement une vérification de syntaxe.
+formulaire Reflex, validation regex, style CSS, graphiques (`chart`,
+4 types, source entité/requête), points d'extension custom — dont
+plusieurs tests qui **importent réellement** le backend et le frontend
+générés (pas seulement une vérification de syntaxe) : flux JWT complet
+(inscription, connexion, rôles, routes protégées) et route de requête
+déclarative via `TestClient`, et construction effective de l'arbre de
+composants Reflex de chaque page de graphique.
 
 ### Limites connues du MVP
 
@@ -357,6 +397,9 @@ requête déclarative, pas seulement une vérification de syntaxe.
 - Le bloc `requete`/`query` ne couvre qu'un filtre simple par comparateur
   sur une seule entité (pas de `ET`/`OU` combinés, pas de jointure) ;
   au-delà, `routers_custom/`.
+- Le bloc `chart` se limite volontairement à 4 types (barres/lignes/
+  camembert/aires) et une seule série par graphique ; pour un tableau de
+  bord plus riche, `frontend/<app>/custom.py`.
 - `/auth/register` laisse le rôle libre par défaut — à restreindre avant
   un déploiement public (voir la section Authentification ci-dessus).
 - Le chart Helm est un squelette à adapter (registre d'images, ingress réel).
@@ -574,6 +617,43 @@ string to write. Available comparators: `>`, `<`, `>=`, `<=`, `==`,
 `!=`. For combined filters, joins, or richer logic, `routers_custom/`
 remains the intended extension point.
 
+### Charts (`chart`)
+
+A `chart <Name> on <Entity|Query> { ... }` block automatically generates
+its own Reflex page (route `/graphiques/<name>`, link added to the nav
+bar) rendering a [Recharts](https://recharts.org/) chart — no extra
+Python dependency to install, `rx.recharts` ships with Reflex:
+
+```
+chart PriceBreakdown on Product {
+  type: bar
+  x_axis: name
+  y_axis: price
+  title: "Price by product"
+}
+```
+
+`on`/`from` references either an **entity** (data comes from its list
+API — JWT protection automatically inherited if `api <Entity> { ...
+protect: <role> }` is present), or a **declarative query** already
+defined earlier in the file (already filtered/sorted data, always
+public):
+
+```
+chart TopExpensive on ExpensiveProducts {
+  type: pie
+  x_axis: name
+  y_axis: price
+}
+```
+
+Available types (`type:`): `bar`/`barres`/`barra`/`balken`,
+`line`/`ligne`/`linea`/`linie`, `pie`/`camembert`/`torta`/`kreis`,
+`area`/`aire`/`área`/`fläche` — each with synonyms in all 6 languages.
+An unknown `on`/`sur` reference (neither an entity nor a query) is
+caught at compile time (`nova check`/`nova compile`), not on the
+page's first load.
+
 ### Beyond the DSL: "custom" extension points
 
 The DSL covers simple CRUD and UI. For everything else — complex
@@ -617,13 +697,14 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-38 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+47 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
 generated-code syntactic validity, foreign keys, explicit Reflex form
-setters, regex validation, CSS styling, custom extension points —
-including several tests that **actually import** the generated backend
-and send it real HTTP requests (`TestClient`): a full JWT flow
-(register, login, roles, protected routes) and the declarative-query
-route, not just a syntax check.
+setters, regex validation, CSS styling, charts (`chart`, 4 types,
+entity/query source), custom extension points — including several
+tests that **actually import** the generated backend and frontend (not
+just a syntax check): a full JWT flow (register, login, roles,
+protected routes) and the declarative-query route via `TestClient`,
+plus actually building the Reflex component tree of every chart page.
 
 ### Known MVP limitations
 
@@ -637,6 +718,9 @@ route, not just a syntax check.
 - The `query`/`requete` block only covers a single comparator-based
   filter on one entity (no combined `AND`/`OR`, no joins); beyond that,
   `routers_custom/`.
+- The `chart` block is deliberately limited to 4 types (bar/line/pie/
+  area) and one series per chart; for a richer dashboard,
+  `frontend/<app>/custom.py`.
 - `/auth/register` leaves the role unrestricted by default — lock this
   down before a public deployment (see the Authentication section
   above).

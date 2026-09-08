@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import textwrap
 
-from ..ast_nodes import NovaProgram, Page
+from ..ast_nodes import Chart, NovaProgram, Page
 from ..keywords import STYLE_ALIASES, STYLE_CLASS_KEYS
 from .utils import to_ascii_identifier, to_pascal_case, to_snake_case, pluralize
 
@@ -81,6 +81,140 @@ def _form_page_for_entity(program: NovaProgram, entity_name: str) -> Page | None
 
 def _api_for_entity(program: NovaProgram, entity_name: str):
     return next((a for a in program.apis if a.entity == entity_name), None)
+
+
+# --------------------------------------------------------------- chart ---
+
+_CHART_COLOR = "#7c66dc"  # violet, cohérent avec le thème accent_color="violet"
+
+
+def _chart_state_class_name(chart: Chart) -> str:
+    return f"{to_pascal_case(chart.name)}ChartState"
+
+
+def _chart_route(chart: Chart) -> str:
+    slug = to_snake_case(to_ascii_identifier(chart.name)).replace("_", "-")
+    return f"/graphiques/{slug}" if slug else "/graphiques"
+
+
+def _chart_data_source(program: NovaProgram, chart: Chart, has_auth: bool) -> tuple[str, bool]:
+    """Résout `chart ... sur <source>` en (chemin_url_backend, protege) :
+    - une Entity -> son API liste (`/<entites>/`), protection héritée du
+      bloc `api <Entity> { proteger: <role> }` s'il existe ;
+    - une Query (`requete`/`query`) -> sa route dédiée (`/requetes/<slug>`),
+      jamais protégée aujourd'hui (voir codegen/api_fastapi._generate_query_router,
+      qui ne pose pas Depends(get_current_user)).
+    `parser._validate_charts` garantit déjà que `chart.source` correspond à
+    l'une des deux, donc le cas "aucune des deux" ne devrait jamais survenir
+    ici — gardé par simple prudence plutôt que de lever une exception au
+    milieu de la génération."""
+    entity = program.get_entity(chart.source)
+    if entity is not None:
+        url_path = to_snake_case(pluralize(to_ascii_identifier(chart.source))) + "/"
+        api = _api_for_entity(program, chart.source)
+        is_protected = bool(has_auth and api and api.protected_role)
+        return url_path, is_protected
+    query = program.get_query(chart.source)
+    if query is not None:
+        slug = to_snake_case(query.name).replace("_", "-")
+        return f"requetes/{slug}", False
+    return to_snake_case(to_ascii_identifier(chart.source)) + "/", False
+
+
+def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth: bool) -> tuple[str, str]:
+    """Retourne (code_du_state, code_de_la_fonction_de_page) pour un bloc
+    `chart`, sur le même modèle que `_generate_state_and_view` ci-dessus :
+    un état Reflex qui charge les lignes de données au montage de la page,
+    et une fonction de page qui les affiche via `rx.recharts` (aucune
+    dépendance Python supplémentaire : recharts est fourni avec Reflex)."""
+    state_cls = _chart_state_class_name(chart)
+    url_path, is_protected = _chart_data_source(program, chart, has_auth)
+
+    auth_header_lines = []
+    if is_protected:
+        auth_header_lines = [
+            "        auth_state = await self.get_state(AuthState)",
+            '        headers = {"Authorization": f"Bearer {auth_state.token}"} if auth_state.token else {}',
+        ]
+    headers_kwarg = ", headers=headers" if is_protected else ""
+
+    state_lines = [
+        f"class {state_cls}(rx.State):",
+        f'    """État Reflex pour le graphique `{chart.name}` (source : {chart.source}).'
+        + (' Route protégée : le jeton AuthState est envoyé en en-tête Authorization."""' if is_protected else '"""'),
+        "    rows: list[dict] = []",
+        "    is_loading: bool = False",
+        "",
+        "    async def load_rows(self):",
+        "        self.is_loading = True",
+    ]
+    state_lines += auth_header_lines
+    state_lines += [
+        "        async with httpx.AsyncClient() as client:",
+        f'            resp = await client.get(f"{{BACKEND_URL}}/{url_path}"{headers_kwarg})',
+        "            if resp.status_code == 200:",
+        "                self.rows = resp.json()",
+        "        self.is_loading = False",
+        "",
+    ]
+    state_code = "\n".join(state_lines) + "\n"
+
+    title = chart.title or chart.name
+    x_key = chart.x_field or "x"
+    y_key = chart.y_field or "y"
+
+    if chart.type == "pie":
+        # La donnée du camembert se pose sur le sous-composant `pie`, pas sur
+        # `pie_chart` lui-même — contrairement à bar/line/area (vérifié par
+        # exécution réelle avant d'écrire ce générateur).
+        chart_component = (
+            "rx.recharts.pie_chart(\n"
+            f'    rx.recharts.pie(data={state_cls}.rows, data_key="{y_key}", name_key="{x_key}", '
+            f'fill="{_CHART_COLOR}"),\n'
+            "    rx.recharts.graphing_tooltip(),\n"
+            "    rx.recharts.legend(),\n"
+            '    width="100%",\n'
+            "    height=360,\n"
+            ")"
+        )
+    else:
+        chart_fn = {"bar": "bar_chart", "line": "line_chart", "area": "area_chart"}[chart.type]
+        series_fn = {"bar": "bar", "line": "line", "area": "area"}[chart.type]
+        if chart.type == "line":
+            series_kwargs = f'data_key="{y_key}", stroke="{_CHART_COLOR}"'
+        elif chart.type == "area":
+            series_kwargs = f'data_key="{y_key}", fill="{_CHART_COLOR}", stroke="{_CHART_COLOR}"'
+        else:  # bar
+            series_kwargs = f'data_key="{y_key}", fill="{_CHART_COLOR}"'
+        chart_component = (
+            f"rx.recharts.{chart_fn}(\n"
+            f"    rx.recharts.{series_fn}({series_kwargs}),\n"
+            f'    rx.recharts.x_axis(data_key="{x_key}"),\n'
+            "    rx.recharts.y_axis(),\n"
+            "    rx.recharts.graphing_tooltip(),\n"
+            f"    data={state_cls}.rows,\n"
+            '    width="100%",\n'
+            "    height=360,\n"
+            ")"
+        )
+
+    inner = (
+        "rx.card(\n"
+        "    rx.vstack(\n"
+        f'        rx.heading("{title}", size="7"),\n'
+        f"{textwrap.indent(chart_component, '        ')},\n"
+        '        spacing="4",\n'
+        '        width="100%",\n'
+        "    ),\n"
+        '    padding="2em",\n'
+        '    width="100%",\n'
+        ")"
+    )
+    view_code = (
+        f"def {to_snake_case(chart.name)}_chart_page() -> rx.Component:\n"
+        + _wrap_page_body(inner, f"{state_cls}.load_rows", "900px")
+    )
+    return state_code, view_code
 
 
 # ---------------------------------------------------------------- style ---
@@ -203,6 +337,13 @@ def _generate_navbar(program: NovaProgram, has_auth: bool) -> str:
         f'color_scheme="gray", high_contrast=True),'
         for p in program.pages
     )
+    chart_links = "\n".join(
+        f'        rx.link("{c.name}", href="{_chart_route(c)}", size="3", weight="medium", '
+        f'color_scheme="gray", high_contrast=True),'
+        for c in program.charts
+    )
+    if chart_links:
+        links = f"{links}\n{chart_links}" if links else chart_links
     auth_links = ""
     if has_auth:
         auth_links = (
@@ -460,7 +601,7 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         "",
     ]
 
-    if program.pages or has_auth:
+    if program.pages or program.charts or has_auth:
         lines.append(_generate_navbar(program, has_auth))
         lines.append("")
 
@@ -478,6 +619,14 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         lines.append(view_code)
         lines.append("")
         page_fns.append((to_snake_case(page.name) + "_page", _page_route(page), page.name))
+
+    for chart in program.charts:
+        state_code, view_code = _generate_chart_state_and_view(chart, program, has_auth)
+        lines.append(state_code)
+        lines.append("")
+        lines.append(view_code)
+        lines.append("")
+        page_fns.append((to_snake_case(chart.name) + "_chart_page", _chart_route(chart), chart.title or chart.name))
 
     theme_kwargs = 'appearance="light", accent_color="violet", radius="large", scaling="100%"'
     app_kwargs = f"theme=rx.theme({theme_kwargs})"

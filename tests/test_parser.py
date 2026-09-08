@@ -312,3 +312,98 @@ def test_style_and_css_prop_keywords_recognize_all_six_languages():
         program = parse_source(src)
         assert program.app.props.get("css") == ("tema.css" if lang != "de" else "thema.css"), lang
         assert program.pages[0].shows[0].style == {"color": "red"}, lang
+
+
+def test_chart_block_on_entity_source_all_types_and_props():
+    src = """
+    entity Produit {
+        field nom: string required
+        field prix: float required
+    }
+
+    chart RepartitionPrix sur Produit {
+        type: barres
+        axe_x: nom
+        axe_y: prix
+        titre: "Prix par produit"
+    }
+    """
+    program = parse_source(src)
+    assert len(program.charts) == 1
+    chart = program.charts[0]
+    assert chart.name == "RepartitionPrix"
+    assert chart.source == "Produit"
+    assert chart.type == "bar"          # "barres" (FR) -> canonique "bar"
+    assert chart.x_field == "nom"
+    assert chart.y_field == "prix"
+    assert chart.title == "Prix par produit"
+
+
+def test_chart_block_on_query_source():
+    src = """
+    entity Produit {
+        field nom: string required
+        field prix: float required
+        field stock: int required
+    }
+
+    requete StockFaible sur Produit {
+        filtre: stock < 10
+        trier_par: stock asc
+    }
+
+    chart Alerte sur StockFaible {
+        type: line
+        axe_x: nom
+        axe_y: stock
+    }
+    """
+    program = parse_source(src)
+    chart = program.charts[0]
+    assert chart.source == "StockFaible"
+    assert chart.type == "line"
+    assert chart.title is None
+
+
+def test_chart_type_keyword_recognizes_all_six_languages():
+    types = {
+        "bar": "bar", "barres": "bar", "barra": "bar", "balken": "bar",
+        "line": "line", "ligne": "line", "linea": "line", "linie": "line",
+        "pie": "pie", "camembert": "pie", "torta": "pie", "kreis": "pie",
+        "area": "area", "aire": "area", "área": "area", "fläche": "area",
+    }
+    for word, canonical in types.items():
+        src = f"""
+        entity P {{ field n: string }}
+        chart C sur P {{ type: {word} }}
+        """
+        program = parse_source(src)
+        assert program.charts[0].type == canonical, word
+
+
+def test_chart_keyword_and_prop_aliases_recognize_all_six_languages():
+    # Le mot-clé du bloc (`chart`/`graphique`/`grafico`/`gráfico`/`diagramm`)
+    # et les alias de propriétés (`axe_x`/`x`/`eje_x`/`x_achse`/`asse_x`/
+    # `eixo_x`, etc. -> "x") dans les 6 langues.
+    sources = {
+        "en": "entity P { field n: string field v: int }\nchart C sur P { x_axis: n y_axis: v }",
+        "fr": "entity P { field n: string field v: int }\ngraphique C sur P { axe_x: n axe_y: v }",
+        "es": "entity P { field n: string field v: int }\ngrafico C sur P { eje_x: n eje_y: v }",
+        "de": "entity P { field n: string field v: int }\ndiagramm C sur P { x_achse: n y_achse: v }",
+        "it": "entity P { field n: string field v: int }\ngrafico C sur P { asse_x: n asse_y: v }",
+        "pt": "entity P { field n: string field v: int }\ngrafico C sur P { eixo_x: n eixo_y: v }",
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        chart = program.charts[0]
+        assert chart.x_field == "n", lang
+        assert chart.y_field == "v", lang
+
+
+def test_chart_sur_unknown_source_raises_syntax_error():
+    src = """
+    entity Produit { field nom: string }
+    chart Bad sur Inconnu { type: pie }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)

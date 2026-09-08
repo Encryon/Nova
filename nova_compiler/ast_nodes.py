@@ -104,6 +104,20 @@ class Query:
 
 
 @dataclass
+class Chart:
+    """Bloc `chart <Nom> sur <Entite|Requete> { ... }` : graphique déclaratif.
+    `source` référence soit une Entity (données = son API liste), soit une
+    Query déjà déclarée (données déjà filtrées/triées) — résolu au moment de
+    la génération (voir codegen/ui_reflex.py), pas au moment du parsing."""
+    name: str
+    source: str
+    type: str = "bar"                  # "bar" | "line" | "pie" | "area"
+    x_field: Optional[str] = None
+    y_field: Optional[str] = None
+    title: Optional[str] = None
+
+
+@dataclass
 class NovaProgram:
     app: Optional[App] = None
     entities: list[Entity] = field(default_factory=list)
@@ -111,6 +125,10 @@ class NovaProgram:
     pages: list[Page] = field(default_factory=list)
     auth: Optional[Auth] = None
     queries: list[Query] = field(default_factory=list)
+    charts: list[Chart] = field(default_factory=list)
 
     def get_entity(self, name: str) -> Optional[Entity]:
         return next((e for e in self.entities if e.name == name), None)
+
+    def get_query(self, name: str) -> Optional[Query]:
+        return next((q for q in self.queries if q.name == name), None)

@@ -110,6 +110,30 @@ STYLE_ALIASES = {
 # `application { css: "..." }`) plutôt qu'une propriété de style inline.
 STYLE_CLASS_KEYS = {"classe", "class", "class_name"}
 
+# ---- bloc `chart { ... }` (graphiques) ------------------------------------
+# Même philosophie que STYLE_ALIASES ci-dessus : les clés du bloc `chart`
+# (`type`, `axe_x`/`x`, `axe_y`/`y`, `titre`/`title`) sont des NAME libres
+# résolues ici plutôt que des mots-clés de grammaire — pas besoin de toucher
+# `grammar/nova.lark` pour ajouter un synonyme. Seul le mot-clé du bloc
+# lui-même (`chart`/`graphique`/...) est un terminal Lark (voir CHART_KW).
+CHART_PROP_ALIASES = {
+    "type": "type", "tipo": "type", "typ": "type",
+    "axe_x": "x", "x": "x", "x_axis": "x",
+    "eje_x": "x", "x_achse": "x", "asse_x": "x", "eixo_x": "x",
+    "axe_y": "y", "y": "y", "y_axis": "y",
+    "eje_y": "y", "y_achse": "y", "asse_y": "y", "eixo_y": "y",
+    "titre": "title", "title": "title",
+    "titulo": "title", "título": "title", "titel": "title", "titolo": "title",
+}
+# Type de graphique : sous-ensemble volontairement restreint de rx.recharts
+# (bar/line/area/pie) — le plus utile pour un tableau de bord simple.
+CHART_TYPES = {
+    "bar": "bar", "barres": "bar", "barre": "bar", "barra": "bar", "barras": "bar", "balken": "bar",
+    "line": "line", "ligne": "line", "linea": "line", "línea": "line", "linie": "line", "linha": "line",
+    "pie": "pie", "camembert": "pie", "tarta": "pie", "torta": "pie", "kreis": "pie", "pizza": "pie", "circular": "pie",
+    "area": "area", "aire": "area", "área": "area", "flaeche": "area", "fläche": "area",
+}
+
 
 def strip_quotes(raw: str) -> str:
     """'"Hello"' -> 'Hello'"""
