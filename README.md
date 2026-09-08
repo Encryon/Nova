@@ -96,7 +96,14 @@ fichier peut même mélanger les deux.
 Stack cible actuelle (v0.2) : **Python / FastAPI** pour l'API,
 **Reflex** (thème Radix, navigation, cartes) pour l'UI web, **Docker**
 pour l'empaquetage, **Kubernetes (Helm, Traefik, HPA)** pour le
-déploiement cloud-native.
+déploiement cloud-native. Authentification JWT avec rôles, requêtes
+déclaratives au-delà du CRUD, et style CSS piloté depuis le DSL sont
+disponibles en un bloc chacun — voir plus bas.
+
+Chaque mot-clé du langage est reconnu en **6 langues** : français,
+anglais, espagnol, allemand, italien, portugais — un même fichier peut
+mélanger n'importe laquelle d'entre elles, elles compilent toutes vers
+le même arbre syntaxique.
 
 ### Installation
 
@@ -166,7 +173,20 @@ pour un fichier qui mélange français et anglais.
 | Afficher | `afficher` | `show` |
 | Comme | `comme` | `as` |
 | Titre | `titre` | `title` |
+| Style | `style` | `style` / `css` |
+| Auth | `authentification` | `auth` / `authentication` |
+| Rôles | `rôles` / `roles` | `roles` |
+| Protéger | `proteger` / `protéger` | `protect` |
+| Requête | `requete` / `requête` | `query` |
+| Filtre | `filtre` | `filter` |
+| Trier par | `trier_par` | `sort_by` / `order_by` |
+| Limite | `limite` | `limit` |
 | Types | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure` | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime` |
+
+Ce tableau ne couvre que FR/EN pour rester lisible ; espagnol, allemand,
+italien et portugais sont acceptés pour les mêmes mots-clés — voir
+`nova_compiler/keywords.py` et `nova_compiler/grammar/nova.lark` pour la
+liste complète des synonymes par langue.
 
 ### Validation par expression régulière
 
@@ -180,6 +200,97 @@ Génère automatiquement une contrainte Pydantic (`pattern=r"..."`) sur le
 modèle de table SQLModel et sur les schémas `Create`/`Update` — l'API
 rejette une valeur invalide avec un `422` sans code de validation à
 écrire à la main.
+
+### Style et CSS
+
+Le bloc `application` accepte une propriété `css` (ou `feuille_style` /
+`stylesheet`) : le fichier référencé, résolu relativement au `.nova`
+source, est copié tel quel dans les assets du frontend Reflex généré et
+chargé globalement (`rx.App(stylesheets=[...])`).
+
+```
+application MaBoutique {
+  nom: "Ma Boutique"
+  css: "theme.css"
+}
+```
+
+Chaque `show` d'une page accepte en plus un bloc `style { ... }` (ou
+`css { ... }`) libre : une clé connue (`couleur_fond`, `arrondi`,
+`police`, `taille_police`, `epaisseur`, `marge`, `espacement`, `ombre`,
+`largeur`, `hauteur`, `bordure`, `couleur`...) est traduite vers la
+vraie propriété CSS ; toute autre clé passe telle quelle (snake_case ou
+kebab-case, convertie en camelCase pour Reflex) — pas besoin d'attendre
+que NOVA connaisse une propriété CSS pour l'utiliser. La clé spéciale
+`classe` (ou `class`/`class_name`) injecte un `class_name=` Reflex,
+utile pour accrocher une classe définie dans la feuille externe :
+
+```
+page Produits {
+  afficher Produit comme table titre "Catalogue" style {
+    couleur_fond: "#445566"
+    arrondi: "12px"
+    classe: "carte-produit"
+  }
+}
+```
+
+Voir `examples/full_featured.nova` et `examples/theme.css`.
+
+### Authentification JWT et rôles
+
+Un bloc `auth` optionnel (une seule fois par projet) active
+l'authentification complète — table utilisateur, hachage de mot de
+passe (`bcrypt`), jetons JWT (`python-jose`), routes `/auth/register`,
+`/auth/login`, `/auth/me`, et une page de connexion Reflex générée
+automatiquement (jeton persisté dans un cookie navigateur) :
+
+```
+auth {
+  roles: admin, user, editeur
+}
+```
+
+Une `api` se protège avec `proteger: <rôle>` (ou `protect`/`protéger`) :
+toutes ses routes exigent alors un jeton valide portant ce rôle — un
+utilisateur `admin` passe toujours, quel que soit le rôle requis.
+
+```
+api Produit {
+  liste
+  créer
+  modifier
+  supprimer
+  proteger: admin
+}
+```
+
+En production, définissez la variable d'environnement
+`NOVA_JWT_SECRET` (le `docker-compose.yml` généré la référence déjà) —
+la valeur par défaut ne doit jamais être utilisée telle quelle. Le
+champ `role` de `/auth/register` est actuellement libre (n'importe qui
+peut s'inscrire comme `admin`) : à restreindre côté `routers_custom/`
+avant tout déploiement public.
+
+### Requêtes déclaratives (`requete` / `query`)
+
+Pour aller au-delà du CRUD simple sans écrire de route à la main, un
+bloc `requete ... sur <Entité> { ... }` (ou `query ... on`/`query ...
+from`) compile vers une route `GET` dédiée avec filtre, tri et limite :
+
+```
+requete ProduitsChers sur Produit {
+  filtre: prix > 100
+  trier_par: prix desc
+  limite: 10
+}
+```
+
+Génère `GET /requetes/produits-chers`, une requête SQLAlchemy lisible
+(`select(...).where(...).order_by(...).limit(...)`) — pas de chaîne SQL
+à écrire. Les comparateurs disponibles : `>`, `<`, `>=`, `<=`, `==`,
+`!=`. Pour des filtres combinés, des jointures ou une logique plus
+riche, `routers_custom/` reste le point d'extension prévu.
 
 ### Aller au-delà du DSL : points d'extension "custom"
 
@@ -224,11 +335,13 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-22 tests : équivalence structurelle FR/EN, validité syntaxique du code
-généré, clés étrangères, setters de formulaire Reflex, validation regex,
-points d'extension custom — dont un test qui **importe réellement** le
-backend généré et lui envoie une requête HTTP (`TestClient`), pas
-seulement une vérification de syntaxe.
+36 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+validité syntaxique du code généré, clés étrangères, setters de
+formulaire Reflex, validation regex, style CSS, points d'extension
+custom — dont plusieurs tests qui **importent réellement** le backend
+généré et lui envoient de vraies requêtes HTTP (`TestClient`) : flux JWT
+complet (inscription, connexion, rôles, routes protégées) et route de
+requête déclarative, pas seulement une vérification de syntaxe.
 
 ### Limites connues du MVP
 
@@ -239,6 +352,11 @@ seulement une vérification de syntaxe.
   `belongs_to` produit une clé étrangère.
 - La validation `motif`/`pattern` ne couvre qu'un seul champ à la fois ;
   toute règle croisant plusieurs champs passe par `routers_custom/`.
+- Le bloc `requete`/`query` ne couvre qu'un filtre simple par comparateur
+  sur une seule entité (pas de `ET`/`OU` combinés, pas de jointure) ;
+  au-delà, `routers_custom/`.
+- `/auth/register` laisse le rôle libre par défaut — à restreindre avant
+  un déploiement public (voir la section Authentification ci-dessus).
 - Le chart Helm est un squelette à adapter (registre d'images, ingress réel).
 - Pas encore de NOVA Studio (IDE dédié), Marketplace, NOVA Cloud, NOVA AI
   — ce dépôt couvre le compilateur (Phase 1/2 de la feuille de route).
@@ -259,7 +377,13 @@ both.
 Current target stack (v0.2): **Python / FastAPI** for the API, **Reflex**
 (Radix theme, navigation, cards) for the web UI, **Docker** for
 packaging, **Kubernetes (Helm, Traefik, HPA)** for cloud-native
-deployment.
+deployment. JWT authentication with roles, declarative queries beyond
+CRUD, and DSL-driven CSS styling are each available as a single block —
+see below.
+
+Every keyword in the language is recognized in **6 languages**: French,
+English, Spanish, German, Italian, Portuguese — a single file can mix
+any of them, and they all compile to the exact same syntax tree.
 
 ### Installation
 
@@ -329,7 +453,20 @@ for a file mixing French and English.
 | Show | `show` | `afficher` |
 | As | `as` | `comme` |
 | Title | `title` | `titre` |
+| Style | `style` / `css` | `style` |
+| Auth | `auth` / `authentication` | `authentification` |
+| Roles | `roles` | `rôles` / `roles` |
+| Protect | `protect` | `proteger` / `protéger` |
+| Query | `query` | `requete` / `requête` |
+| Filter | `filter` | `filtre` |
+| Sort by | `sort_by` / `order_by` | `trier_par` |
+| Limit | `limit` | `limite` |
 | Types | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime` | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure` |
+
+This table only covers EN/FR for readability; Spanish, German, Italian
+and Portuguese are accepted for the same keywords — see
+`nova_compiler/keywords.py` and `nova_compiler/grammar/nova.lark` for
+the full per-language synonym list.
 
 ### Regex field validation
 
@@ -342,6 +479,97 @@ field email: string required pattern = "^[^@]+@[^@]+$"
 Automatically generates a Pydantic `pattern=r"..."` constraint on the
 SQLModel table and on the `Create`/`Update` schemas — the API rejects an
 invalid value with a `422`, no hand-written validation code needed.
+
+### Style and CSS
+
+The `application` block accepts a `css` property (or `feuille_style` /
+`stylesheet`): the referenced file, resolved relative to the source
+`.nova` file, is copied as-is into the generated Reflex frontend's
+assets and loaded globally (`rx.App(stylesheets=[...])`).
+
+```
+app MyShop {
+  name: "My Shop"
+  css: "theme.css"
+}
+```
+
+Each `show` in a page also accepts a free-form `style { ... }` (or
+`css { ... }`) block: a known key (`couleur_fond`/`background`,
+`arrondi`/`border_radius`, `police`/`font_family`, `font_size`,
+`font_weight`, `margin`, `padding`, `box_shadow`, `width`, `height`,
+`border`, `color`...) is translated to the real CSS property; any other
+key is passed through as-is (snake_case or kebab-case, converted to
+camelCase for Reflex) — no need to wait for NOVA to know about a CSS
+property before using it. The special `class`/`classe`/`class_name` key
+injects a Reflex `class_name=`, handy for hooking into a class defined
+in the external stylesheet:
+
+```
+page Products {
+  show Product as table title "Catalog" style {
+    background: "#445566"
+    border_radius: "12px"
+    class_name: "product-card"
+  }
+}
+```
+
+See `examples/full_featured.nova` and `examples/theme.css`.
+
+### JWT authentication and roles
+
+An optional `auth` block (once per project) enables full
+authentication — a user table, password hashing (`bcrypt`), JWT tokens
+(`python-jose`), `/auth/register`, `/auth/login`, `/auth/me` routes, and
+an auto-generated Reflex login page (token persisted in a browser
+cookie):
+
+```
+auth {
+  roles: admin, user, editor
+}
+```
+
+An `api` is protected with `protect: <role>` (or `proteger`/`protéger`):
+every route on it then requires a valid token carrying that role — an
+`admin` user always passes, whatever role is required.
+
+```
+api Product {
+  list
+  create
+  update
+  delete
+  protect: admin
+}
+```
+
+In production, set the `NOVA_JWT_SECRET` environment variable (the
+generated `docker-compose.yml` already references it) — never use the
+default value as-is. The `role` field on `/auth/register` is currently
+unrestricted (anyone can register as `admin`) — lock this down in
+`routers_custom/` before any public deployment.
+
+### Declarative queries (`query` / `requete`)
+
+To go beyond simple CRUD without hand-writing a route, a `query ...
+on/from <Entity> { ... }` block (or `requete ... sur`) compiles to a
+dedicated `GET` route with filtering, sorting and a limit:
+
+```
+query ExpensiveProducts on Product {
+  filter: price > 100
+  sort_by: price desc
+  limit: 10
+}
+```
+
+Generates `GET /requetes/expensive-products`, a readable SQLAlchemy
+query (`select(...).where(...).order_by(...).limit(...)`) — no SQL
+string to write. Available comparators: `>`, `<`, `>=`, `<=`, `==`,
+`!=`. For combined filters, joins, or richer logic, `routers_custom/`
+remains the intended extension point.
 
 ### Beyond the DSL: "custom" extension points
 
@@ -386,11 +614,13 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-22 tests: FR/EN structural equivalence, generated-code syntactic
-validity, foreign keys, explicit Reflex form setters, regex validation,
-custom extension points — including a test that **actually imports** the
-generated backend and sends it a real HTTP request (`TestClient`), not
-just a syntax check.
+36 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+generated-code syntactic validity, foreign keys, explicit Reflex form
+setters, regex validation, CSS styling, custom extension points —
+including several tests that **actually import** the generated backend
+and send it real HTTP requests (`TestClient`): a full JWT flow
+(register, login, roles, protected routes) and the declarative-query
+route, not just a syntax check.
 
 ### Known MVP limitations
 
@@ -401,6 +631,12 @@ just a syntax check.
   `belongs_to` produces a foreign key.
 - `pattern`/`motif` validation covers a single field at a time; any rule
   spanning multiple fields belongs in `routers_custom/`.
+- The `query`/`requete` block only covers a single comparator-based
+  filter on one entity (no combined `AND`/`OR`, no joins); beyond that,
+  `routers_custom/`.
+- `/auth/register` leaves the role unrestricted by default — lock this
+  down before a public deployment (see the Authentication section
+  above).
 - The Helm chart is a skeleton meant to be adapted (image registry, real
   ingress).
 - Not yet included: NOVA Studio (dedicated IDE), Marketplace, NOVA

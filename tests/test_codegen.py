@@ -2,6 +2,7 @@
 
 import ast
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -253,3 +254,208 @@ def test_custom_frontend_extension_point_is_scaffolded_and_wired(tmp_path):
     main_source = main_files[0].read_text(encoding="utf-8")
     assert "from . import custom as _custom" in main_source
     assert "_custom.register(app)" in main_source
+
+
+# ---------------------------------------------------------------- style ---
+
+
+def test_style_block_generates_class_name_and_inline_style_props(tmp_path):
+    """Le bloc `style { couleur_fond: "#445566" classe: "carte-produit" }`
+    du fichier .nova doit se retrouver dans le composant Reflex généré :
+    `classe`/`class` -> `class_name=`, les autres clés connues de
+    `keywords.STYLE_ALIASES` -> la vraie propriété CSS (camelCase) dans un
+    dict `style={...}`."""
+    program = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(program, tmp_path)
+    frontend_files = [
+        f
+        for f in (tmp_path / "frontend").rglob("*.py")
+        if f.name not in ("rxconfig.py", "__init__.py", "custom.py")
+    ]
+    source = frontend_files[0].read_text(encoding="utf-8")
+    assert 'class_name="carte-produit"' in source
+    assert '"backgroundColor": "#445566"' in source
+
+
+def test_external_css_file_is_copied_into_frontend_assets(tmp_path):
+    """`application { css: "theme.css" }` doit copier le contenu réel du
+    fichier (résolu relativement au dossier du .nova source) dans
+    `frontend/<app>/assets/theme.css`, et l'app Reflex générée doit le
+    référencer via `stylesheets=["/theme.css"]`."""
+    program = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(program, tmp_path, source_dir=EXAMPLES)
+
+    asset_files = list((tmp_path / "frontend").rglob("theme.css"))
+    assert len(asset_files) == 1
+    copied = asset_files[0].read_text(encoding="utf-8")
+    original = (EXAMPLES / "theme.css").read_text(encoding="utf-8")
+    assert copied == original
+    assert ".carte-produit" in copied  # pas un placeholder vide
+
+    frontend_files = [
+        f
+        for f in (tmp_path / "frontend").rglob("*.py")
+        if f.name not in ("rxconfig.py", "__init__.py", "custom.py")
+    ]
+    source = frontend_files[0].read_text(encoding="utf-8")
+    assert 'stylesheets=["/theme.css"]' in source
+
+
+def test_css_placeholder_left_when_source_dir_not_given(tmp_path):
+    """Sans `source_dir` (ou si le fichier référencé n'existe pas), un
+    placeholder vide est laissé à l'emplacement attendu par Reflex plutôt
+    que de faire planter la génération."""
+    program = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(program, tmp_path)  # pas de source_dir
+    asset_files = list((tmp_path / "frontend").rglob("theme.css"))
+    assert len(asset_files) == 1
+    placeholder = asset_files[0].read_text(encoding="utf-8")
+    assert ".carte-produit" not in placeholder  # pas le vrai contenu de theme.css
+
+
+# ----------------------------------------------------------------- auth ---
+
+
+def test_auth_and_query_flow_end_to_end(tmp_path):
+    """Vérifie le flux JWT complet ET le point de requête déclarative en
+    exécutant réellement le backend généré (pas seulement une validation
+    de syntaxe) : inscription, connexion, accès refusé sans jeton, refusé
+    avec le mauvais rôle, autorisé pour un admin (bloc `auth { roles:
+    admin, user }` + `api Produit { ... proteger: admin }`), puis que
+    `requete ProduitsChers sur Produit { filtre: prix > 100 ... }` filtre/
+    trie/limite les données réelles.
+
+    Les deux vérifications sont regroupées dans un seul test (plutôt que
+    deux tests qui importeraient chacun `app.main`) car le module `auth.py`
+    généré définit une table SQLModel `nova_users` sur le registre global
+    partagé de SQLAlchemy : un second `importlib.import_module("app.main")`
+    dans le même process, même après avoir vidé `sys.modules`, redéfinit la
+    même classe de table et lève `InvalidRequestError: Table 'nova_users'
+    is already defined for this MetaData instance`."""
+    program = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(program, tmp_path, source_dir=EXAMPLES)
+
+    requirements = (tmp_path / "backend/requirements.txt").read_text(encoding="utf-8")
+    assert "bcrypt" in requirements
+    assert "python-jose" in requirements
+    assert "python-multipart" in requirements
+
+    router_src = (tmp_path / "backend/app/routers/_requetes.py").read_text(encoding="utf-8")
+    assert "models.Produit.prix > 100" in router_src
+    assert "order_by(models.Produit.prix.desc())" in router_src
+    assert ".limit(10)" in router_src
+
+    backend_dir = str(tmp_path / "backend")
+    sys.path.insert(0, backend_dir)
+    db_url = f"sqlite:///{tmp_path}/test_auth_query.db"
+    old_db_url = os.environ.get("NOVA_DATABASE_URL")
+    os.environ["NOVA_DATABASE_URL"] = db_url
+    for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[mod_name]
+    try:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        with TestClient(main.app) as client:
+            r = client.post(
+                "/auth/register",
+                json={"email": "admin@test.com", "password": "secret123", "role": "admin"},
+            )
+            assert r.status_code == 201
+            assert r.json()["role"] == "admin"
+
+            r = client.post(
+                "/auth/register", json={"email": "user@test.com", "password": "secret123"}
+            )
+            assert r.status_code == 201
+            assert r.json()["role"] == "user"  # rôle par défaut, non fourni
+
+            # inscrire deux fois le même email doit échouer
+            r = client.post(
+                "/auth/register", json={"email": "admin@test.com", "password": "x"}
+            )
+            assert r.status_code == 400
+
+            r = client.post(
+                "/auth/login", data={"username": "admin@test.com", "password": "secret123"}
+            )
+            assert r.status_code == 200
+            admin_token = r.json()["access_token"]
+
+            r = client.post(
+                "/auth/login", data={"username": "user@test.com", "password": "secret123"}
+            )
+            assert r.status_code == 200
+            user_token = r.json()["access_token"]
+
+            # mauvais mot de passe -> 401
+            r = client.post(
+                "/auth/login", data={"username": "admin@test.com", "password": "wrong"}
+            )
+            assert r.status_code == 401
+
+            r = client.get("/auth/me", headers={"Authorization": f"Bearer {admin_token}"})
+            assert r.status_code == 200
+            assert r.json()["email"] == "admin@test.com"
+
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
+            payload = {"nom": "Ordinateur", "prix": 1200, "stock": 5}
+            # `api Produit { ... proteger: admin }` : toute l'API est protégée.
+            assert client.post("/produits", json=payload).status_code == 401
+            assert (
+                client.post(
+                    "/produits", json=payload, headers={"Authorization": f"Bearer {user_token}"}
+                ).status_code
+                == 403
+            )
+            r = client.post("/produits", json=payload, headers=admin_headers)
+            assert r.status_code == 201
+
+            for nom, prix in [("Stylo", 2), ("Chaise", 80), ("Bureau", 350)]:
+                client.post(
+                    "/produits", json={"nom": nom, "prix": prix, "stock": 1}, headers=admin_headers
+                )
+
+            r = client.get("/requetes/produits-chers")
+            assert r.status_code == 200
+            rows = r.json()
+            assert [row["nom"] for row in rows] == ["Ordinateur", "Bureau"]
+            assert all(row["prix"] > 100 for row in rows)
+    finally:
+        sys.path.remove(backend_dir)
+        if old_db_url is None:
+            os.environ.pop("NOVA_DATABASE_URL", None)
+        else:
+            os.environ["NOVA_DATABASE_URL"] = old_db_url
+        for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+            del sys.modules[mod_name]
+
+
+def test_unprotected_api_has_no_role_dependency(tmp_path):
+    """Une `api` sans `proteger: <role>` doit rester publique : le routeur
+    généré ne doit référencer aucune dépendance `require_role`."""
+    program = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(program, tmp_path)
+    router_files = list((tmp_path / "backend/app/routers").glob("*.py"))
+    router_files = [f for f in router_files if f.name != "__init__.py"]
+    for f in router_files:
+        assert "require_role" not in f.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- docker ---
+
+
+def test_docker_compose_includes_jwt_secret_only_when_auth_enabled(tmp_path):
+    with_auth = parse_file(EXAMPLES / "full_featured.nova")
+    generate_project(with_auth, tmp_path / "with_auth")
+    compose = (tmp_path / "with_auth/docker-compose.yml").read_text(encoding="utf-8")
+    assert "NOVA_JWT_SECRET" in compose
+
+    without_auth = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(without_auth, tmp_path / "without_auth")
+    compose = (tmp_path / "without_auth/docker-compose.yml").read_text(encoding="utf-8")
+    assert "NOVA_JWT_SECRET" not in compose
+    # Le bloc `environment:` doit rester syntaxiquement propre même sans
+    # ligne JWT injectée (pas de ligne vide parasite avant le prochain
+    # champ, ce qui casserait l'indentation YAML).
+    assert "NOVA_DATABASE_URL: sqlite:///./nova.db\n    volumes:" in compose

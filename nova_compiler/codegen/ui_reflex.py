@@ -12,6 +12,22 @@ les pages, un conteneur centré, des cartes (`rx.card`) pour les
 tableaux/formulaires/fiches, et des boutons de navigation entre les pages
 liées à une même entité (ex. lien "+ Nouveau" depuis un tableau vers son
 formulaire de création).
+
+Deux points d'extension supplémentaires restent "hyper simples" tout en
+gardant la porte ouverte à du CSS/design sur mesure :
+- `application { css: "chemin/vers/fichier.css" }` charge une feuille de
+  style externe (copiée dans `frontend/assets/`, référencée via
+  `rx.App(stylesheets=[...])`).
+- `show ... style { propriete: "valeur" }` ajoute des styles inline (alias
+  bilingues courants dans `keywords.STYLE_ALIASES`, ou n'importe quelle
+  propriété CSS passée telle quelle) et/ou une classe CSS (`classe`/`class`)
+  sur le composant généré, pour venir piocher dans la feuille de style
+  externe.
+
+Si le bloc `auth { ... }` est présent, une page de connexion et un état
+d'authentification partagé (`AuthState`, jeton JWT persisté en cookie) sont
+générés, et chaque page liée à une entité protégée (`api Xxx { ...
+proteger: <role> }`) envoie le jeton en en-tête `Authorization`.
 """
 
 from __future__ import annotations
@@ -19,6 +35,7 @@ from __future__ import annotations
 import textwrap
 
 from ..ast_nodes import NovaProgram, Page
+from ..keywords import STYLE_ALIASES, STYLE_CLASS_KEYS
 from .utils import to_ascii_identifier, to_pascal_case, to_snake_case, pluralize
 
 _HEADER = (
@@ -62,13 +79,139 @@ def _form_page_for_entity(program: NovaProgram, entity_name: str) -> Page | None
     return None
 
 
-def _generate_navbar(program: NovaProgram) -> str:
+def _api_for_entity(program: NovaProgram, entity_name: str):
+    return next((a for a in program.apis if a.entity == entity_name), None)
+
+
+# ---------------------------------------------------------------- style ---
+
+def _snake_to_camel(name: str) -> str:
+    parts = name.replace("-", "_").split("_")
+    return parts[0] + "".join(p[:1].upper() + p[1:] for p in parts[1:] if p)
+
+
+def _style_kwargs_src(style: dict[str, str]) -> str:
+    """Kwargs Reflex supplémentaires (`, class_name="...", style={...}`) pour
+    un bloc `style { ... }` du DSL — chaîne vide si aucun style déclaré.
+    Les clés connues de `keywords.STYLE_ALIASES` (ex. `couleur_fond`) sont
+    traduites vers la propriété CSS réelle ; toute autre clé est passée
+    telle quelle (snake_case ou kebab-case), convertie en camelCase pour
+    Reflex — la "porte de sortie" qui garde ce bloc aussi souple que du CSS
+    brut."""
+    if not style:
+        return ""
+    class_name = None
+    css_props: dict[str, str] = {}
+    for key, value in style.items():
+        if key in STYLE_CLASS_KEYS:
+            class_name = value
+            continue
+        css_key = STYLE_ALIASES.get(key, key.replace("_", "-"))
+        camel_key = _snake_to_camel(css_key.replace("-", "_"))
+        css_props[camel_key] = value
+    parts = []
+    if class_name:
+        parts.append(f'class_name="{class_name}"')
+    if css_props:
+        style_dict_src = ", ".join(f'"{k}": "{v}"' for k, v in css_props.items())
+        parts.append(f"style={{{style_dict_src}}}")
+    return (", " + ", ".join(parts)) if parts else ""
+
+
+# ----------------------------------------------------------------- auth ---
+
+_AUTH_STATE_TEMPLATE = '''\
+class AuthState(rx.State):
+    """État d'authentification partagé (voir bloc `auth {{ ... }}` du fichier
+    .nova) — le jeton JWT est persisté dans un cookie navigateur, valable
+    entre deux rechargements de page."""
+
+    token: str = rx.Cookie("", name="nova_token")
+    email: str = ""
+    password: str = ""
+    error_message: str = ""
+
+    def set_email(self, value: str) -> None:
+        self.email = value
+
+    def set_password(self, value: str) -> None:
+        self.password = value
+
+    async def login(self):
+        self.error_message = ""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{{BACKEND_URL}}/auth/login",
+                data={{"username": self.email, "password": self.password}},
+            )
+            if resp.status_code == 200:
+                self.token = resp.json()["access_token"]
+                self.password = ""
+                return rx.redirect("{home_route}")
+            self.error_message = "Identifiants invalides / Invalid credentials"
+
+    def logout(self):
+        self.token = ""
+        return rx.redirect("{login_route}")
+'''
+
+
+def _generate_auth_state(program: NovaProgram) -> str:
+    home_route = _page_route(program.pages[0]) if program.pages else "/"
+    return _AUTH_STATE_TEMPLATE.format(home_route=home_route, login_route="/connexion")
+
+
+def _generate_login_page() -> str:
+    inner = (
+        "rx.card(\n"
+        "    rx.vstack(\n"
+        '        rx.heading("Connexion / Login", size="7"),\n'
+        '        rx.cond(\n'
+        '            AuthState.error_message != "",\n'
+        '            rx.text(AuthState.error_message, color="red", size="2"),\n'
+        "        ),\n"
+        "        rx.vstack(\n"
+        '            rx.text("Email", size="2", weight="bold", color_scheme="gray"),\n'
+        '            rx.input(placeholder="email@exemple.com", value=AuthState.email, '
+        'on_change=AuthState.set_email, size="3", width="100%"),\n'
+        '            spacing="1",\n'
+        '            width="100%",\n'
+        "        ),\n"
+        "        rx.vstack(\n"
+        '            rx.text("Mot de passe / Password", size="2", weight="bold", color_scheme="gray"),\n'
+        '            rx.input(placeholder="********", value=AuthState.password, '
+        'on_change=AuthState.set_password, type="password", size="3", width="100%"),\n'
+        '            spacing="1",\n'
+        '            width="100%",\n'
+        "        ),\n"
+        '        rx.button("Se connecter / Log in", on_click=AuthState.login, size="3", '
+        'width="100%", color_scheme="violet"),\n'
+        '        spacing="4",\n'
+        '        width="100%",\n'
+        "    ),\n"
+        '    padding="2em",\n'
+        '    width="100%",\n'
+        ")"
+    )
+    return "def connexion_page() -> rx.Component:\n" + _wrap_page_body(inner, "None", "420px")
+
+
+def _generate_navbar(program: NovaProgram, has_auth: bool) -> str:
     app_title = program.app.name if program.app else "NOVA App"
     links = "\n".join(
         f'        rx.link("{p.name}", href="{_page_route(p)}", size="3", weight="medium", '
         f'color_scheme="gray", high_contrast=True),'
         for p in program.pages
     )
+    auth_links = ""
+    if has_auth:
+        auth_links = (
+            "        rx.cond(\n"
+            "            AuthState.token != \"\",\n"
+            '            rx.button("Déconnexion / Log out", on_click=AuthState.logout, size="2", variant="soft"),\n'
+            '            rx.link(rx.button("Connexion / Log in", size="2"), href="/connexion"),\n'
+            "        ),\n"
+        )
     return (
         "def nova_navbar() -> rx.Component:\n"
         '    """Barre de navigation partagée entre toutes les pages générées."""\n'
@@ -76,6 +219,7 @@ def _generate_navbar(program: NovaProgram) -> str:
         f'        rx.heading("{app_title}", size="5", weight="bold"),\n'
         "        rx.spacer(),\n"
         f"{links}\n"
+        f"{auth_links}"
         "        align=\"center\",\n"
         "        width=\"100%\",\n"
         "        padding=\"1em 2em\",\n"
@@ -115,7 +259,7 @@ def _wrap_page_body(inner_component_src: str, on_mount_expr: str, container_max_
     )
 
 
-def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str]:
+def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -> tuple[str, str]:
     """Retourne (code_du_state, code_de_la_fonction_de_page) pour un bloc page."""
     if not page.shows:
         state_cls = _state_class_name(page)
@@ -132,10 +276,13 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
     table_url_path = to_snake_case(pluralize(to_ascii_identifier(show.entity)))
     title = show.title or page.name
     fields = entity.fields if entity else []
+    api = _api_for_entity(program, show.entity)
+    is_protected = bool(has_auth and api and api.protected_role)
 
     state_lines = [
         f"class {state_cls}(rx.State):",
-        f'    """État Reflex pour la page `{page.name}` (affiche {show.entity} en mode {show.mode})."""',
+        f'    """État Reflex pour la page `{page.name}` (affiche {show.entity} en mode {show.mode}).'
+        + (' Route protégée : le jeton AuthState est envoyé en en-tête Authorization."""' if is_protected else '"""'),
         "    rows: list[dict] = []",
         "    is_loading: bool = False",
     ]
@@ -153,12 +300,23 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
             state_lines.append(f"    def set_new_{snake}(self, value: str) -> None:")
             state_lines.append(f"        self.new_{snake} = value")
 
+    auth_header_lines = []
+    if is_protected:
+        auth_header_lines = [
+            "        auth_state = await self.get_state(AuthState)",
+            '        headers = {"Authorization": f"Bearer {auth_state.token}"} if auth_state.token else {}',
+        ]
+    headers_kwarg = ", headers=headers" if is_protected else ""
+
     state_lines += [
         "",
         "    async def load_rows(self):",
         "        self.is_loading = True",
+    ]
+    state_lines += auth_header_lines
+    state_lines += [
         "        async with httpx.AsyncClient() as client:",
-        f'            resp = await client.get(f"{{BACKEND_URL}}/{table_url_path}/")',
+        f'            resp = await client.get(f"{{BACKEND_URL}}/{table_url_path}/"{headers_kwarg})',
         "            if resp.status_code == 200:",
         "                self.rows = resp.json()",
         "        self.is_loading = False",
@@ -167,10 +325,11 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
     if show.mode == "form":
         payload_items = ", ".join(f'"{to_snake_case(f.name)}": self.new_{to_snake_case(f.name)}' for f in fields)
         redirect_route = _table_route_for_entity(program, show.entity)
+        state_lines += ["    async def submit(self):"]
+        state_lines += auth_header_lines
         state_lines += [
-            "    async def submit(self):",
             "        async with httpx.AsyncClient() as client:",
-            f'            await client.post(f"{{BACKEND_URL}}/{table_url_path}/", json={{{payload_items}}})',
+            f'            await client.post(f"{{BACKEND_URL}}/{table_url_path}/", json={{{payload_items}}}{headers_kwarg})',
         ]
         for f in fields:
             state_lines.append(f'        self.new_{to_snake_case(f.name)} = ""')
@@ -182,6 +341,8 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
             state_lines.append("        await self.load_rows()")
         state_lines.append("")
     state_code = "\n".join(state_lines) + "\n"
+
+    style_kwargs = _style_kwargs_src(show.style)
 
     # ---- vue -------------------------------------------------------------
     if show.mode == "table":
@@ -213,7 +374,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
             '            variant="surface",\n'
             '            width="100%",\n'
             "        ),\n"
-            '        width="100%",\n'
+            f'        width="100%"{style_kwargs},\n'
             "    ),\n"
             '    spacing="4",\n'
             '    width="100%",\n'
@@ -244,8 +405,8 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
             '        spacing="4",\n'
             '        width="100%",\n'
             "    ),\n"
-            '    padding="2em",\n'
-            '    width="100%",\n'
+            f'    padding="2em",\n'
+            f'    width="100%"{style_kwargs},\n'
             ")"
         )
         container_width = "560px"
@@ -266,7 +427,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
             '        width="100%",\n'
             "    ),\n"
             '    spacing="4",\n'
-            '    width="100%",\n'
+            f'    width="100%"{style_kwargs},\n'
             ")"
         )
         container_width = "1100px"
@@ -281,6 +442,9 @@ def _generate_state_and_view(page: Page, program: NovaProgram) -> tuple[str, str
 def generate_frontend(program: NovaProgram) -> dict[str, str]:
     pkg = _app_pkg_name(program)
     app_title = program.app.name if program.app else "NOVA App"
+    has_auth = program.auth is not None and program.auth.enabled
+    css_path = program.app.props.get("css") if program.app else None
+    css_basename = css_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] if css_path else None
 
     lines = [
         _HEADER,
@@ -296,26 +460,35 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         "",
     ]
 
-    if program.pages:
-        lines.append(_generate_navbar(program))
+    if program.pages or has_auth:
+        lines.append(_generate_navbar(program, has_auth))
+        lines.append("")
+
+    if has_auth:
+        lines.append(_generate_auth_state(program))
+        lines.append("")
+        lines.append(_generate_login_page())
         lines.append("")
 
     page_fns = []
     for page in program.pages:
-        state_code, view_code = _generate_state_and_view(page, program)
+        state_code, view_code = _generate_state_and_view(page, program, has_auth)
         lines.append(state_code)
         lines.append("")
         lines.append(view_code)
         lines.append("")
         page_fns.append((to_snake_case(page.name) + "_page", _page_route(page), page.name))
 
-    lines.append(
-        'app = rx.App(theme=rx.theme(appearance="light", accent_color="violet", '
-        'radius="large", scaling="100%"))'
-    )
+    theme_kwargs = 'appearance="light", accent_color="violet", radius="large", scaling="100%"'
+    app_kwargs = f"theme=rx.theme({theme_kwargs})"
+    if css_basename:
+        app_kwargs += f', stylesheets=["/{css_basename}"]'
+    lines.append(f"app = rx.App({app_kwargs})")
     for fn_name, route, title in page_fns:
         lines.append(f'app.add_page({fn_name}, route="{route}", title="{title}")')
-    if not page_fns:
+    if has_auth:
+        lines.append('app.add_page(connexion_page, route="/connexion", title="Connexion")')
+    if not page_fns and not has_auth:
         lines.append("")
         lines.append('@rx.page(route="/")')
         lines.append("def index() -> rx.Component:")
@@ -342,12 +515,25 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         + f'config = rx.Config(\n    app_name="{pkg}",\n)\n'
     )
 
-    return {
+    files = {
         f"frontend/{pkg}/{pkg}.py": main_code,
         f"frontend/{pkg}/__init__.py": "",
         "frontend/rxconfig.py": rxconfig,
         "frontend/requirements.txt": "reflex>=0.5\nhttpx>=0.27\n",
     }
+    if css_basename:
+        # Feuille de style externe (`application { css: "..." }`) : le
+        # *contenu réel* du fichier référencé est copié ici par
+        # `codegen.generate_project` (qui connaît le dossier source du
+        # .nova) — on réserve juste l'emplacement attendu par Reflex
+        # (`assets/`, servi à la racine du site) avec un contenu par défaut
+        # au cas où le fichier source ne serait pas trouvé.
+        files[f"frontend/{pkg}/assets/{css_basename}"] = (
+            "/* Remplacé par le contenu de la feuille de style référencée dans\n"
+            f"   `application {{ css: \"{css_path}\" }}` si ce fichier a été trouvé au\n"
+            "   moment de la compilation (voir nova_compiler.codegen.generate_project). */\n"
+        )
+    return files
 
 
 _CUSTOM_FRONTEND_EXAMPLE = '''\

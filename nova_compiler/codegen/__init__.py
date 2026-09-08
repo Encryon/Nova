@@ -19,10 +19,17 @@ from .ui_reflex import generate_frontend, generate_frontend_scaffold
 __all__ = ["generate_project", "generate_backend", "generate_frontend", "generate_docker", "generate_k8s"]
 
 
-def generate_project(program: NovaProgram, output_dir: str | Path) -> list[Path]:
+def generate_project(program: NovaProgram, output_dir: str | Path, source_dir: str | Path | None = None) -> list[Path]:
     """
     Génère un projet complet à partir de l'AST NOVA dans `output_dir`.
     Retourne la liste des fichiers écrits.
+
+    `source_dir`, quand fourni (le dossier contenant le fichier .nova source
+    — voir `cli.py`), sert uniquement à résoudre le chemin d'une éventuelle
+    feuille de style externe (`application { css: "chemin/relatif.css" }`) :
+    si le fichier existe à cet emplacement, son contenu réel est copié dans
+    `frontend/<app>/assets/` ; sinon un fichier vide (placeholder) est laissé
+    à la place attendue par Reflex.
 
     Deux catégories de fichiers :
     - les fichiers "générés" (models.py, routers/*.py, main.py, la page
@@ -48,6 +55,18 @@ def generate_project(program: NovaProgram, output_dir: str | Path) -> list[Path]
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         written.append(target)
+
+    # `application { css: "..." }` : si le fichier référencé existe bien à
+    # côté du .nova source, son contenu réel remplace le placeholder généré
+    # ci-dessus dans generate_frontend().
+    css_path = program.app.props.get("css") if program.app else None
+    if css_path and source_dir is not None:
+        candidate = Path(source_dir) / css_path
+        if candidate.is_file():
+            for rel_path in list(files):
+                if rel_path.endswith("/assets/" + candidate.name):
+                    target = out / rel_path
+                    target.write_bytes(candidate.read_bytes())
 
     scaffold_files: dict[str, str] = {}
     scaffold_files.update(generate_backend_scaffold())

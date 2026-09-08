@@ -52,6 +52,7 @@ class Entity:
 class Api:
     entity: str
     actions: list[str] = field(default_factory=list)  # subset of list/create/update/delete/get
+    protected_role: Optional[str] = None  # `proteger: <role>` — None = API publique
 
 
 @dataclass
@@ -59,6 +60,7 @@ class PageShow:
     entity: str
     mode: str = "table"        # "table" | "form" | "card"
     title: Optional[str] = None
+    style: dict[str, str] = field(default_factory=dict)  # bloc `style { ... }` (voir keywords.STYLE_ALIASES)
 
 
 @dataclass
@@ -74,11 +76,41 @@ class App:
 
 
 @dataclass
+class Auth:
+    """Bloc `auth { ... }` : active l'authentification JWT + rôles pour tout
+    le projet généré. Absent (NovaProgram.auth is None) = pas d'auth."""
+    enabled: bool = True
+    roles: list[str] = field(default_factory=lambda: ["user"])
+    default_role: str = "user"
+
+
+@dataclass
+class QueryFilter:
+    field: str
+    op: str                                    # ">" | "<" | ">=" | "<=" | "==" | "!="
+    value: Union[str, int, float, bool] = None
+
+
+@dataclass
+class Query:
+    """Bloc `requete <Nom> sur <Entite> { ... }` : requête déclarative
+    au-delà du CRUD simple (filtre/tri/limite), sans SQL à écrire."""
+    name: str
+    entity: str
+    filters: list[QueryFilter] = field(default_factory=list)
+    order_by: Optional[str] = None
+    order_dir: str = "asc"                      # "asc" | "desc"
+    limit: Optional[int] = None
+
+
+@dataclass
 class NovaProgram:
     app: Optional[App] = None
     entities: list[Entity] = field(default_factory=list)
     apis: list[Api] = field(default_factory=list)
     pages: list[Page] = field(default_factory=list)
+    auth: Optional[Auth] = None
+    queries: list[Query] = field(default_factory=list)
 
     def get_entity(self, name: str) -> Optional[Entity]:
         return next((e for e in self.entities if e.name == name), None)

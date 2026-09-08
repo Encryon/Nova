@@ -1,0 +1,41 @@
+// Exemple complet : authentification JWT + rôles, requête déclarative,
+// style CSS (fichier externe + style tableau), et mots-clés multilingues.
+// Full-featured example: JWT auth + roles, declarative query, CSS styling
+// (external stylesheet + inline style block), and multilingual keywords.
+
+application Boutique {
+  nom: "Boutique NOVA"
+  langue: fr
+  css: "theme.css"
+}
+
+entité Produit {
+  champ nom: chaine requis
+  champ prix: decimal
+  champ stock: entier
+}
+
+auth {
+  roles: admin, user
+}
+
+api Produit {
+  liste
+  créer
+  modifier
+  supprimer
+  proteger: admin
+}
+
+requete ProduitsChers sur Produit {
+  filtre: prix > 100
+  trier_par: prix desc
+  limite: 10
+}
+
+page Produits {
+  afficher Produit comme table titre "Catalogue" style {
+    couleur_fond: "#445566"
+    classe: "carte-produit"
+  }
+}

@@ -1,0 +1,4 @@
+/* Exemple de feuille de style externe chargée via `application { css: "theme.css" }`. */
+.carte-produit {
+  border: 1px solid #44556e;
+}

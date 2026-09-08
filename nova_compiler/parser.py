@@ -10,7 +10,7 @@ from lark import Lark, Transformer, v_args
 from lark.exceptions import LarkError
 
 from . import keywords as kw
-from .ast_nodes import Api, App, Entity, Field, NovaProgram, Page, PageShow, Relation
+from .ast_nodes import Api, App, Auth, Entity, Field, NovaProgram, Page, PageShow, Query, QueryFilter, Relation
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar" / "nova.lark"
 
@@ -54,13 +54,13 @@ class _NovaTransformer(Transformer):
         # ("required",) | ("unique",) | ("default", value) | ("pattern", regex)
         if len(parts) == 1:
             key = str(parts[0])
-            if key in ("required", "requis"):
+            if key in kw.REQUIRED_WORDS:
                 return ("required", True)
-            if key == "unique":
+            if key in kw.UNIQUE_WORDS:
                 return ("unique", True)
         else:
             first_key = str(parts[0])
-            if first_key in ("pattern", "motif", "regex"):
+            if first_key in kw.PATTERN_WORDS:
                 return ("pattern", kw.strip_quotes(str(parts[-1])))
             return ("default", parts[-1])
         return ("unknown", True)
@@ -98,31 +98,101 @@ class _NovaTransformer(Transformer):
     def api_action(self, tok):
         return kw.ACTIONS.get(str(tok), str(tok))
 
-    def api_decl(self, _kw_tok, name_tok, *actions):
-        return Api(entity=str(name_tok), actions=list(actions))
+    def protect_stmt(self, _kw_tok, role_tok):
+        return ("protect", str(role_tok))
+
+    def api_member(self, member):
+        return member
+
+    def api_decl(self, _kw_tok, name_tok, *members):
+        api = Api(entity=str(name_tok))
+        for m in members:
+            if isinstance(m, tuple) and m[0] == "protect":
+                api.protected_role = m[1]
+            else:
+                api.actions.append(m)
+        return api
 
     # ---- page --------------------------------------------------------------
     def display_mode(self, tok):
         return kw.DISPLAY_MODES.get(str(tok), str(tok))
 
+    def style_prop(self, key_tok, val_tok):
+        return (str(key_tok), kw.strip_quotes(str(val_tok)))
+
+    def style_block(self, _kw_tok, *props):
+        return dict(props)
+
     def page_stmt(self, _kw_tok, name_tok, *rest):
         mode = "table"
         title = None
+        style: dict[str, str] = {}
         for r in rest:
             # Ignore les tokens de mot-clé eux-mêmes (AS_KW / TITLE_KW) : seuls
-            # les enfants déjà résolus (display_mode -> str canonique, ou le
-            # token STRING du titre) nous intéressent ici.
+            # les enfants déjà résolus (display_mode -> str canonique, le
+            # token STRING du titre, ou le dict issu de style_block) nous
+            # intéressent ici.
             tok_type = getattr(r, "type", None)
             if tok_type in ("AS_KW", "TITLE_KW"):
                 continue
             if tok_type == "STRING":
                 title = kw.strip_quotes(str(r))
+            elif isinstance(r, dict):
+                style = r
             elif isinstance(r, str) and r in ("table", "form", "card"):
                 mode = r
-        return PageShow(entity=str(name_tok), mode=mode, title=title)
+        return PageShow(entity=str(name_tok), mode=mode, title=title, style=style)
 
     def page_decl(self, _kw_tok, name_tok, *shows):
         return Page(name=str(name_tok), shows=list(shows))
+
+    # ---- auth --------------------------------------------------------------
+    def name_list(self, *names):
+        return [str(n) for n in names]
+
+    def auth_prop(self, kw_tok, value):
+        key = str(kw_tok)
+        if key in ("roles", "rôles"):
+            return ("roles", value)
+        return ("default_role", str(value))
+
+    def auth_decl(self, _kw_tok, *props):
+        auth = Auth(enabled=True)
+        for key, val in props:
+            if key == "roles":
+                auth.roles = val
+            elif key == "default_role":
+                auth.default_role = val
+                if val not in auth.roles:
+                    auth.roles.append(val)
+        return auth
+
+    # ---- query ---------------------------------------------------------------
+    def query_prop(self, kw_tok, *rest):
+        key = str(kw_tok)
+        if key in ("filtre", "filter"):
+            field_tok, comparator_tok, val = rest
+            return ("filter", QueryFilter(field=str(field_tok), op=str(comparator_tok), value=val))
+        if key in ("trier_par", "sort_by", "order_by"):
+            field_tok = rest[0]
+            direction = "asc"
+            if len(rest) > 1 and getattr(rest[1], "type", None) == "DESC_KW":
+                direction = "desc"
+            return ("order", (str(field_tok), direction))
+        if key in ("limite", "limit"):
+            return ("limit", int(str(rest[0])))
+        return ("unknown", None)
+
+    def query_decl(self, _kw_tok, name_tok, _sur_tok, entity_tok, *props):
+        q = Query(name=str(name_tok), entity=str(entity_tok))
+        for key, val in props:
+            if key == "filter":
+                q.filters.append(val)
+            elif key == "order":
+                q.order_by, q.order_dir = val
+            elif key == "limit":
+                q.limit = val
+        return q
 
     # ---- programme -----------------------------------------------------
     def statement(self, stmt):
@@ -139,6 +209,10 @@ class _NovaTransformer(Transformer):
                 program.apis.append(s)
             elif isinstance(s, Page):
                 program.pages.append(s)
+            elif isinstance(s, Auth):
+                program.auth = s
+            elif isinstance(s, Query):
+                program.queries.append(s)
         return program
 
 

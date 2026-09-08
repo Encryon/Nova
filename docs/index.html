@@ -381,11 +381,11 @@
 
     <div class="grid">
       <div class="card">
-        <div class="icon">FR/EN</div>
-        <h3 data-lang-block="fr">DSL bilingue natif</h3>
-        <h3 data-lang-block="en">Native bilingual DSL</h3>
-        <p data-lang-block="fr">Chaque bloc et chaque type existe en français et en anglais, et compile vers le même AST canonique — même dans un fichier mixte.</p>
-        <p data-lang-block="en">Every block and type exists in both French and English and compiles to the same canonical AST — even within a single mixed file.</p>
+        <div class="icon">6×</div>
+        <h3 data-lang-block="fr">DSL multilingue natif</h3>
+        <h3 data-lang-block="en">Native multilingual DSL</h3>
+        <p data-lang-block="fr">Chaque bloc et chaque type existe en français, anglais, espagnol, allemand, italien et portugais, et compile vers le même AST canonique — même dans un fichier mixte.</p>
+        <p data-lang-block="en">Every block and type exists in French, English, Spanish, German, Italian and Portuguese, and compiles to the same canonical AST — even within a single mixed file.</p>
       </div>
       <div class="card">
         <div class="icon">4×</div>
@@ -416,11 +416,25 @@
         <p data-lang-block="en">Dockerfiles and a Helm chart are generated from the very first <code>nova compile</code>, with no manual setup.</p>
       </div>
       <div class="card">
+        <div class="icon">🔒</div>
+        <h3 data-lang-block="fr">Auth JWT et rôles en un bloc</h3>
+        <h3 data-lang-block="en">JWT auth and roles in one block</h3>
+        <p data-lang-block="fr">Un bloc <code>auth { roles: ... }</code> génère inscription, connexion, jetons JWT et page de connexion Reflex ; <code>proteger: admin</code> protège une API entière.</p>
+        <p data-lang-block="en">One <code>auth { roles: ... }</code> block generates registration, login, JWT tokens and a Reflex login page; <code>protect: admin</code> secures an entire API.</p>
+      </div>
+      <div class="card">
+        <div class="icon">{css}</div>
+        <h3 data-lang-block="fr">Style CSS et requêtes déclaratives</h3>
+        <h3 data-lang-block="en">CSS styling and declarative queries</h3>
+        <p data-lang-block="fr">Feuille de style externe ou bloc <code>style { couleur_fond: "#445" }</code> libre, et <code>requete ... sur ... { filtre; trier_par; limite }</code> pour aller au-delà du CRUD sans SQL.</p>
+        <p data-lang-block="en">An external stylesheet or a free-form <code>style { background: "#445" }</code> block, plus <code>query ... on ... { filter; sort_by; limit }</code> to go beyond CRUD without SQL.</p>
+      </div>
+      <div class="card">
         <div class="icon">✓</div>
         <h3 data-lang-block="fr">Testé de bout en bout</h3>
         <h3 data-lang-block="en">Tested end to end</h3>
-        <p data-lang-block="fr">22 tests, dont un qui importe réellement le backend généré et lui envoie une vraie requête HTTP.</p>
-        <p data-lang-block="en">22 tests, including one that actually imports the generated backend and sends it a real HTTP request.</p>
+        <p data-lang-block="fr">36 tests, dont plusieurs qui importent réellement le backend généré et lui envoient de vraies requêtes HTTP (flux JWT complet, requêtes déclaratives).</p>
+        <p data-lang-block="en">36 tests, including several that actually import the generated backend and send it real HTTP requests (full JWT flow, declarative queries).</p>
       </div>
     </div>
   </div>

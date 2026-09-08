@@ -8,7 +8,7 @@ delete/get, dans n'importe quelle langue à l'origine).
 
 from __future__ import annotations
 
-from ..ast_nodes import Entity, NovaProgram
+from ..ast_nodes import Entity, NovaProgram, QueryFilter
 from .utils import PY_TYPE_MAP, pluralize, to_ascii_identifier, to_pascal_case, to_snake_case
 
 _HEADER = (
@@ -157,7 +157,7 @@ def get_session() -> Iterator[Session]:
 '''
 
 
-def _generate_router(entity: Entity, actions: list[str]) -> str:
+def _generate_router(entity: Entity, actions: list[str], protected_role: str | None = None) -> str:
     cls = _model_class_name(entity)
     table = _table_name(entity)
     var = to_snake_case(entity.name)
@@ -172,8 +172,17 @@ def _generate_router(entity: Entity, actions: list[str]) -> str:
         "",
         "from ..database import get_session",
         f"from ..models import {cls}, {cls}Create, {cls}Update",
-        "",
-        f'router = APIRouter(prefix="/{table}", tags=["{tag}"])',
+    ]
+    if protected_role:
+        lines.append("from ..auth import require_role")
+    lines.append("")
+    router_kwargs = f'prefix="/{table}", tags=["{tag}"]'
+    if protected_role:
+        # `proteger: <role>` dans le DSL protège TOUTES les actions de cette
+        # API d'un coup — le plus simple à écrire, et le plus dur à oublier.
+        router_kwargs += f', dependencies=[Depends(require_role("{protected_role}"))]'
+    lines += [
+        f"router = APIRouter({router_kwargs})",
         "",
         "",
     ]
@@ -252,6 +261,8 @@ def _generate_router(entity: Entity, actions: list[str]) -> str:
 
 def _generate_main(program: NovaProgram) -> str:
     app_name = program.app.name if program.app else "NovaApp"
+    has_auth = program.auth is not None and program.auth.enabled
+    has_queries = bool(program.queries)
     lines = [
         _HEADER,
         "from __future__ import annotations",
@@ -265,6 +276,10 @@ def _generate_main(program: NovaProgram) -> str:
         "from .database import init_db",
         "from . import routers_custom",
     ]
+    if has_auth:
+        lines.append("from .auth import router as auth_router")
+    if has_queries:
+        lines.append("from .routers._requetes import router as requetes_router")
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
@@ -289,6 +304,10 @@ def _generate_main(program: NovaProgram) -> str:
         "",
         "",
     ]
+    if has_auth:
+        lines.append("app.include_router(auth_router)")
+    if has_queries:
+        lines.append("app.include_router(requetes_router)")
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
@@ -315,23 +334,230 @@ def _generate_main(program: NovaProgram) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _generate_auth(program: NovaProgram) -> str:
+    auth = program.auth
+    roles = auth.roles if auth and auth.roles else ["user"]
+    default_role = auth.default_role if auth else "user"
+    roles_literal = "[" + ", ".join(repr(r) for r in roles) + "]"
+    return _HEADER + f'''
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import bcrypt
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from sqlmodel import Field, Session, SQLModel, select
+
+from .database import get_session
+
+# Bloc `auth {{ ... }}` du fichier .nova : rôles déclarés et rôle par défaut
+# attribué à l'inscription si aucun n'est précisé.
+ROLES = {roles_literal}
+DEFAULT_ROLE = "{default_role}"
+
+# Clé de signature JWT : à définir en production via la variable
+# d'environnement NOVA_JWT_SECRET. La valeur par défaut ci-dessous permet au
+# projet généré de démarrer "out of the box" — ne JAMAIS l'utiliser telle
+# quelle en production.
+SECRET_KEY = os.environ.get("NOVA_JWT_SECRET", "nova-dev-secret-change-me")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+
+# Hachage direct via la bibliothèque `bcrypt` (et non `passlib`, dont
+# l'intégration bcrypt est cassée avec les versions récentes de la
+# bibliothèque `bcrypt` — `passlib`, non maintenu depuis 2020, échoue avec
+# une `ValueError` sans rapport à l'exécution — voir la doc du framework).
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
+
+
+class User(SQLModel, table=True):
+    """Table utilisateur générée par le bloc `auth {{ ... }}` — indépendante
+    des entités du DSL."""
+
+    __tablename__ = "nova_users"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    password_hash: str
+    role: str = Field(default=DEFAULT_ROLE)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class UserCreate(SQLModel):
+    email: str
+    password: str
+    role: Optional[str] = None
+
+
+class UserRead(SQLModel):
+    id: int
+    email: str
+    role: str
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+
+
+def create_access_token(data: dict) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({{"exp": expire}})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(
+    token: Optional[str] = Depends(oauth2_scheme), session: Session = Depends(get_session)
+) -> User:
+    credentials_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Identifiants invalides ou absents / Missing or invalid credentials",
+        headers={{"WWW-Authenticate": "Bearer"}},
+    )
+    if token is None:
+        raise credentials_error
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if email is None:
+            raise credentials_error
+    except JWTError:
+        raise credentials_error
+    user = session.exec(select(User).where(User.email == email)).first()
+    if user is None:
+        raise credentials_error
+    return user
+
+
+def require_role(role: str):
+    """Dépendance FastAPI protégeant une route/un routeur pour un rôle donné
+    (utilisée automatiquement pour `api Xxx {{ ... proteger: <role> }}`) —
+    un utilisateur "admin" passe toujours, quel que soit le rôle requis."""
+
+    def _dependency(user: User = Depends(get_current_user)) -> User:
+        if user.role != role and user.role != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Accès refusé / Forbidden")
+        return user
+
+    return _dependency
+
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/register", response_model=UserRead, status_code=201)
+def register(payload: UserCreate, session: Session = Depends(get_session)):
+    existing = session.exec(select(User).where(User.email == payload.email)).first()
+    if existing is not None:
+        raise HTTPException(status_code=400, detail="Email déjà utilisé / Email already registered")
+    role = payload.role if payload.role in ROLES else DEFAULT_ROLE
+    user = User(email=payload.email, password_hash=hash_password(payload.password), role=role)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+@router.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), session: Session = Depends(get_session)):
+    """Compatible OAuth2PasswordRequestForm : envoyer `username` (= email) et
+    `password` en `application/x-www-form-urlencoded`."""
+    user = session.exec(select(User).where(User.email == form_data.username)).first()
+    if user is None or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Identifiants invalides / Invalid credentials")
+    token = create_access_token({{"sub": user.email, "role": user.role}})
+    return {{"access_token": token, "token_type": "bearer"}}
+
+
+@router.get("/me", response_model=UserRead)
+def me(user: User = Depends(get_current_user)):
+    return user
+'''
+
+
+def _format_query_value(value) -> str:
+    if isinstance(value, str):
+        return repr(value)
+    return repr(value)
+
+
+def _generate_query_router(program: NovaProgram) -> str:
+    lines = [
+        _HEADER,
+        "from __future__ import annotations",
+        "",
+        "from fastapi import APIRouter, Depends",
+        "from sqlmodel import Session, select",
+        "",
+        "from ..database import get_session",
+        "from .. import models",
+        "",
+        'router = APIRouter(prefix="/requetes", tags=["requetes"])',
+        "",
+        "",
+    ]
+    for q in program.queries:
+        entity = program.get_entity(q.entity)
+        cls = to_pascal_case(entity.name) if entity else to_pascal_case(q.entity)
+        slug = to_snake_case(q.name).replace("_", "-")
+        fn_name = to_snake_case(q.name)
+        lines += [
+            f'@router.get("/{slug}", response_model=list[models.{cls}])',
+            f"def {fn_name}(session: Session = Depends(get_session)):",
+            f'    """Requête déclarative `requete {q.name} sur {q.entity} {{ ... }}` du fichier .nova."""',
+            f"    query = select(models.{cls})",
+        ]
+        for f in q.filters:
+            snake = to_snake_case(f.field)
+            lines.append(f"    query = query.where(models.{cls}.{snake} {f.op} {_format_query_value(f.value)})")
+        if q.order_by:
+            snake = to_snake_case(q.order_by)
+            direction = "desc" if q.order_dir == "desc" else "asc"
+            lines.append(f"    query = query.order_by(models.{cls}.{snake}.{direction}())")
+        if q.limit is not None:
+            lines.append(f"    query = query.limit({q.limit})")
+        lines += [
+            "    return session.exec(query).all()",
+            "",
+            "",
+        ]
+    return "\n".join(lines) + "\n"
+
+
 def generate_backend(program: NovaProgram) -> dict[str, str]:
+    has_auth = program.auth is not None and program.auth.enabled
+    has_queries = bool(program.queries)
+
+    requirements = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "sqlmodel>=0.0.16"]
+    if has_auth:
+        requirements += ["bcrypt>=4.0", "python-jose[cryptography]>=3.3", "python-multipart>=0.0.9"]
+
     files: dict[str, str] = {
         "backend/app/__init__.py": "",
         "backend/app/models.py": _generate_models(program),
         "backend/app/database.py": _generate_database(),
         "backend/app/routers/__init__.py": "",
         "backend/app/main.py": _generate_main(program),
-        "backend/requirements.txt": (
-            "fastapi>=0.110\nuvicorn[standard]>=0.29\nsqlmodel>=0.0.16\n"
-        ),
+        "backend/requirements.txt": "\n".join(requirements) + "\n",
     }
+    if has_auth:
+        files["backend/app/auth.py"] = _generate_auth(program)
+    if has_queries:
+        files["backend/app/routers/_requetes.py"] = _generate_query_router(program)
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
             continue
         table = _table_name(entity)
-        files[f"backend/app/routers/{table}.py"] = _generate_router(entity, api.actions)
+        files[f"backend/app/routers/{table}.py"] = _generate_router(entity, api.actions, api.protected_role)
     return files
 
 

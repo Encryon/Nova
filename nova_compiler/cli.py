@@ -120,7 +120,7 @@ def compile(
         console.print(f"[red]✗ Erreur de syntaxe / Syntax error[/red]\n{exc}")
         raise typer.Exit(code=1)
 
-    written = generate_project(program, output)
+    written = generate_project(program, output, source_dir=source.parent)
     console.print(f"[green]✓[/green] {len(written)} fichiers générés dans / files generated in [bold]{output}[/bold]")
     for f in sorted(written):
         console.print(f"  {f}")
@@ -138,7 +138,7 @@ def run(
         console.print(f"[red]✗ Erreur de syntaxe / Syntax error[/red]\n{exc}")
         raise typer.Exit(code=1)
 
-    generate_project(program, output)
+    generate_project(program, output, source_dir=source.parent)
     console.print(f"[green]✓[/green] Projet compilé dans / project compiled in [bold]{output}[/bold]")
     console.print("[cyan]→[/cyan] docker compose up --build")
     subprocess.run(["docker", "compose", "up", "--build"], cwd=output, check=False)

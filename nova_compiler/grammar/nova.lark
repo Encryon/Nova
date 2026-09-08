@@ -1,7 +1,9 @@
 // ============================================================================
-// NOVA DSL grammar — bilingual FR/EN business-intent language.
-// Every keyword has an English and a French spelling; both compile to the
-// exact same AST node, so a .nova file can freely mix EN/FR blocks.
+// NOVA DSL grammar — multilingual business-intent language.
+// Core block/type keywords exist in French, English, Spanish, German,
+// Italian and Portuguese; every spelling compiles to the exact same AST
+// node, so a .nova file can freely mix languages. Newer blocks (style,
+// auth, requete/query) are bilingual FR/EN for now.
 // ============================================================================
 
 start: statement*
@@ -10,6 +12,8 @@ statement: app_decl
          | entity_decl
          | api_decl
          | page_decl
+         | auth_decl
+         | query_decl
 
 // ---------------------------------------------------------------- app -----
 // Optional single block describing the application itself.
@@ -37,54 +41,94 @@ relation_decl: HAS_MANY_KW NAME
              | BELONGS_TO_KW NAME
 
 // ---------------------------------------------------------------- api -----
-api_decl: API_KW NAME "{" api_action* "}"
+api_decl: API_KW NAME "{" api_member* "}"
+api_member: api_action
+          | protect_stmt
 api_action: LIST_KW | CREATE_KW | UPDATE_KW | DELETE_KW | GET_KW
+protect_stmt: PROTECT_KW ":" NAME
 
 // --------------------------------------------------------------- page -----
 page_decl: PAGE_KW NAME "{" page_stmt* "}"
-page_stmt: SHOW_KW NAME (AS_KW display_mode)? (TITLE_KW STRING)?
+page_stmt: SHOW_KW NAME (AS_KW display_mode)? (TITLE_KW STRING)? style_block?
 display_mode: TABLE_KW | FORM_KW | CARD_KW
+style_block: STYLE_KW "{" style_prop* "}"
+style_prop: NAME ":" STRING
+
+// --------------------------------------------------------------- auth -----
+// Bloc optionnel unique : active l'authentification JWT + rôles pour tout
+// le projet généré (backend + page de connexion Reflex).
+auth_decl: AUTH_KW "{" auth_prop* "}"
+auth_prop: ROLES_KW ":" name_list
+         | DEFAULT_ROLE_KW ":" NAME
+name_list: NAME ("," NAME)*
+
+// -------------------------------------------------------------- query -----
+// Requête déclarative au-delà du CRUD simple : filtre/tri/limite sur une
+// entité, compilée en une route API dédiée (pas de SQL à écrire pour les
+// cas courants).
+query_decl: QUERY_KW NAME SUR_KW NAME "{" query_prop* "}"
+query_prop: FILTRE_KW ":" NAME COMPARATOR value
+          | TRIER_KW ":" NAME (ASC_KW | DESC_KW)?
+          | LIMITE_KW ":" NUMBER
 
 value: STRING | NUMBER | BOOL_TRUE | BOOL_FALSE | NAME
 
-// ================================================== bilingual terminals ===
-APP_KW: "app" | "application"
-ENTITY_KW: "entity" | "entité" | "entite"
-FIELD_KW: "field" | "champ"
-REQUIRED_KW: "required" | "requis"
-UNIQUE_KW: "unique"
-DEFAULT_KW: "default" | "defaut" | "défaut" | "par_defaut" | "par_défaut"
-PATTERN_KW: "pattern" | "motif" | "regex"
-HAS_MANY_KW: "has_many" | "possede_plusieurs" | "possède_plusieurs"
-BELONGS_TO_KW: "belongs_to" | "appartient_a" | "appartient_à"
+// ================================================== multilingual terminals ===
+APP_KW: "app" | "application" | "aplicacion" | "aplicación" | "anwendung" | "applicazione" | "aplicacao" | "aplicação"
+ENTITY_KW: "entity" | "entité" | "entite" | "entidad" | "entitaet" | "entität" | "entita" | "entità" | "entidade"
+FIELD_KW: "field" | "champ" | "campo" | "feld"
+REQUIRED_KW: "required" | "requis" | "requerido" | "obligatorio" | "erforderlich" | "richiesto" | "obbligatorio" | "obrigatorio" | "obrigatório"
+UNIQUE_KW: "unique" | "unico" | "único" | "eindeutig"
+DEFAULT_KW: "default" | "defaut" | "défaut" | "par_defaut" | "par_défaut" | "predeterminado" | "por_defecto" | "standard" | "predefinito" | "padrao" | "padrão"
+PATTERN_KW: "pattern" | "motif" | "regex" | "patron" | "patrón" | "muster" | "modello" | "formato"
+HAS_MANY_KW: "has_many" | "possede_plusieurs" | "possède_plusieurs" | "tiene_muchos" | "hat_viele" | "ha_molti" | "tem_muitos"
+BELONGS_TO_KW: "belongs_to" | "appartient_a" | "appartient_à" | "pertenece_a" | "gehoert_zu" | "gehört_zu" | "appartiene_a" | "pertence_a"
 
 API_KW: "api"
-LIST_KW: "list" | "liste"
-CREATE_KW: "create" | "creer" | "créer"
-UPDATE_KW: "update" | "modifier" | "mettre_a_jour" | "mettre_à_jour"
-DELETE_KW: "delete" | "supprimer"
-GET_KW: "get" | "obtenir" | "lire"
+LIST_KW: "list" | "liste" | "listar" | "lista" | "elenco" | "auflisten"
+CREATE_KW: "create" | "creer" | "créer" | "crear" | "erstellen" | "creare" | "criar"
+UPDATE_KW: "update" | "modifier" | "mettre_a_jour" | "mettre_à_jour" | "actualizar" | "aktualisieren" | "aggiornare" | "atualizar"
+DELETE_KW: "delete" | "supprimer" | "eliminar" | "borrar" | "loeschen" | "löschen" | "eliminare" | "excluir"
+GET_KW: "get" | "obtenir" | "lire" | "obtener" | "erhalten" | "holen" | "ottenere" | "obter"
+PROTECT_KW: "proteger" | "protect" | "protéger"
 
-PAGE_KW: "page"
-SHOW_KW: "show" | "afficher"
-AS_KW: "as" | "comme"
-TITLE_KW: "title" | "titre"
-TABLE_KW: "table"
-FORM_KW: "form" | "formulaire"
-CARD_KW: "card" | "carte"
+PAGE_KW: "page" | "pagina" | "página" | "seite"
+SHOW_KW: "show" | "afficher" | "mostrar" | "zeigen" | "anzeigen" | "mostrare" | "exibir"
+AS_KW: "as" | "comme" | "como" | "als" | "come"
+TITLE_KW: "title" | "titre" | "titulo" | "título" | "titel" | "titolo"
+TABLE_KW: "table" | "tabla" | "tabelle" | "tabella" | "tabela"
+FORM_KW: "form" | "formulaire" | "formulario" | "formulário" | "formular" | "modulo"
+CARD_KW: "card" | "carte" | "tarjeta" | "karte" | "scheda" | "cartao" | "cartão"
+STYLE_KW: "style" | "css"
 
-TYPE_STRING: "string" | "chaine" | "chaîne"
-TYPE_TEXT: "text" | "texte"
-TYPE_INT: "int" | "integer" | "entier"
-TYPE_FLOAT: "float" | "decimal" | "décimal"
-TYPE_BOOL: "bool" | "boolean" | "booleen" | "booléen"
-TYPE_DATE: "date"
-TYPE_DATETIME: "datetime" | "date_heure"
+AUTH_KW: "auth" | "authentification" | "authentication"
+ROLES_KW: "roles" | "rôles"
+DEFAULT_ROLE_KW: "role_par_defaut" | "role_par_défaut" | "default_role"
 
-BOOL_TRUE: "true" | "vrai"
-BOOL_FALSE: "false" | "faux"
+QUERY_KW: "requete" | "requête" | "query"
+SUR_KW: "sur" | "on" | "from"
+FILTRE_KW: "filtre" | "filter"
+TRIER_KW: "trier_par" | "sort_by" | "order_by"
+ASC_KW: "asc" | "croissant"
+DESC_KW: "desc" | "décroissant" | "decroissant"
+LIMITE_KW: "limite" | "limit"
+COMPARATOR: ">=" | "<=" | "==" | "!=" | ">" | "<"
+
+TYPE_STRING: "string" | "chaine" | "chaîne" | "cadena" | "zeichenkette" | "stringa" | "cadeia"
+TYPE_TEXT: "text" | "texte" | "texto" | "testo"
+TYPE_INT: "int" | "integer" | "entier" | "entero" | "ganzzahl" | "intero" | "inteiro"
+TYPE_FLOAT: "float" | "decimal" | "décimal" | "flotante" | "gleitkomma" | "decimale"
+TYPE_BOOL: "bool" | "boolean" | "booleen" | "booléen" | "booleano" | "boolesch"
+TYPE_DATE: "date" | "fecha" | "datum" | "data"
+TYPE_DATETIME: "datetime" | "date_heure" | "fecha_hora" | "datum_zeit" | "data_ora" | "data_hora"
+
+BOOL_TRUE: "true" | "vrai" | "verdadero" | "wahr" | "vero" | "verdadeiro"
+BOOL_FALSE: "false" | "faux" | "falso" | "falsch"
 
 PROP_NAME: "name" | "nom" | "description" | "lang" | "langue" | "version"
+         | "nombre" | "nome" | "descripcion" | "descripción" | "beschreibung" | "descrizione"
+         | "descricao" | "descrição" | "idioma" | "lingua" | "sprache"
+         | "css" | "feuille_style" | "stylesheet"
 
 NAME: /[^\W\d]\w*/
 STRING: /"[^"]*"/
