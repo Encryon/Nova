@@ -35,14 +35,14 @@ highlighting and snippets in either language.
 > non-commercial, et bascule automatiquement sous licence Apache 2.0
 > (100% permissive) quatre ans après chaque publication. Un usage
 > commercial nécessite une licence payante — écrivez à
-> **licensing@encryon.io**. Voir [Licence](#licence--license) en bas de
+> **contact@enc-soft.com**. Voir [Licence](#licence--license) en bas de
 > page pour le détail.
 >
 > NOVA is distributed under the [Business Source License 1.1](LICENSE.md):
 > the code is open and readable by everyone today, free for any
 > non-commercial use, and automatically converts to the fully permissive
 > Apache 2.0 license four years after each release. Commercial use
-> requires a paid license — reach out to **licensing@encryon.io**. See
+> requires a paid license — reach out to **contact@enc-soft.com**. See
 > [License](#licence--license) at the bottom of this page for details.
 
 ## Démarrage rapide / Quickstart
@@ -417,7 +417,7 @@ just a syntax check.
   formation, évaluation, contributions à ce dépôt.
 - 🇫🇷 **Usage commercial** (en entreprise, dans un produit ou service
   vendu, en hébergement) → licence commerciale requise auprès d'Encryon
-  (ENC-SOFT) : **licensing@encryon.io**.
+  (ENC-SOFT) : **contact@enc-soft.com**.
 - 🇫🇷 **Bascule automatique** vers la licence **Apache 2.0** (permissive)
   quatre ans après la publication de chaque version — pour la v0.2.0,
   le **2030-09-08**.
@@ -426,7 +426,7 @@ just a syntax check.
   evaluation, contributions to this repository.
 - 🇬🇧 **Commercial use** (inside a business, in a product or service you
   sell, or as a hosted offering) → requires a commercial license from
-  Encryon (ENC-SOFT): **licensing@encryon.io**.
+  Encryon (ENC-SOFT): **contact@enc-soft.com**.
 - 🇬🇧 **Automatic conversion** to the permissive **Apache 2.0** license
   four years after each version's publication — for v0.2.0, on
   **2030-09-08**.

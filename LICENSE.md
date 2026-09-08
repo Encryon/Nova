@@ -18,7 +18,7 @@ Additional Use Grant:  You may use, copy, modify, and create derivative
                        product or service you sell, or use in a hosted
                        offering — only if you have first obtained a
                        commercial license from Encryon (ENC-SOFT). Contact
-                       licensing@encryon.io to obtain one.
+                       contact@enc-soft.com to obtain one.
 Change Date:           Four years from the publication date of each
                        version of the Licensed Work. For version 0.2.0,
                        first published 2026-09-08, the Change Date is
@@ -28,7 +28,7 @@ Change Date:           Four years from the publication date of each
 Change License:        Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed
-Work, please contact licensing@encryon.io.
+Work, please contact contact@enc-soft.com.
 
 Notice
 
