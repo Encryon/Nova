@@ -4,13 +4,13 @@
 
 # NOVA
 
-**Un DSL bilingue (FR/EN) d'intention métier qui compile vers une API FastAPI, une UI Reflex, des images Docker et des manifests Kubernetes/Helm.**
-**A bilingual (FR/EN) business-intent DSL that compiles to a FastAPI API, a Reflex UI, Docker images and Kubernetes/Helm manifests.**
+**Un DSL multilingue (FR/EN/ES/DE/IT/PT) d'intention métier qui compile vers une API FastAPI (auth JWT, requêtes déclaratives), une UI Reflex stylable en CSS, des images Docker et des manifests Kubernetes/Helm.**
+**A multilingual (FR/EN/ES/DE/IT/PT) business-intent DSL that compiles to a FastAPI API (JWT auth, declarative queries), a CSS-stylable Reflex UI, Docker images and Kubernetes/Helm manifests.**
 
 ![Statut](https://img.shields.io/badge/statut-fair--source%20/%20open-6e4bf0)
-![Version](https://img.shields.io/badge/version-0.2.0-6e4bf0)
+![Version](https://img.shields.io/badge/version-0.3.0-6e4bf0)
 ![Python](https://img.shields.io/badge/python-3.11%2B-6e4bf0)
-![Tests](https://img.shields.io/badge/tests-22%20passed-2f9e6e)
+![Tests](https://img.shields.io/badge/tests-36%20passed-2f9e6e)
 ![Licence](https://img.shields.io/badge/licence-BSL%201.1%20→%20Apache%202.0-a8630f)
 
 [🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Licence](#licence--license)
@@ -65,7 +65,7 @@ Backend sur `http://localhost:8000/docs` · Frontend sur `http://localhost:3000`
 
 ```mermaid
 flowchart LR
-    A["app.nova<br/>(FR / EN / mixte)"] -->|"grammar/nova.lark<br/>grammaire Lark bilingue"| B["Arbre Lark<br/>Lark parse tree"]
+    A["app.nova<br/>(FR/EN/ES/DE/IT/PT, mixte)"] -->|"grammar/nova.lark<br/>grammaire Lark multilingue"| B["Arbre Lark<br/>Lark parse tree"]
     B -->|"parser.py<br/>Transformer"| C["AST canonique<br/>Canonical AST"]
     C --> D["codegen/api_fastapi.py<br/>→ FastAPI + SQLModel"]
     C --> E["codegen/ui_reflex.py<br/>→ Reflex UI"]
