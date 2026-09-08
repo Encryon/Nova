@@ -1,0 +1,112 @@
+{
+  "Entity (EN)": {
+    "prefix": "entity",
+    "body": [
+      "entity ${1:EntityName} {",
+      "  field ${2:name}: ${3:string} required",
+      "  $0",
+      "}"
+    ],
+    "description": "Déclare une entité (anglais) / Declare an entity (English)"
+  },
+  "Entité (FR)": {
+    "prefix": "entite",
+    "body": [
+      "entité ${1:NomEntite} {",
+      "  champ ${2:nom}: ${3:chaine} requis",
+      "  $0",
+      "}"
+    ],
+    "description": "Déclare une entité (français) / Declare an entity (French)"
+  },
+  "Api (EN)": {
+    "prefix": "api",
+    "body": [
+      "api ${1:EntityName} {",
+      "  list",
+      "  create",
+      "  update",
+      "  delete",
+      "}"
+    ],
+    "description": "Déclare une API CRUD (anglais) / Declare a CRUD API (English)"
+  },
+  "Api (FR)": {
+    "prefix": "api-fr",
+    "body": [
+      "api ${1:NomEntite} {",
+      "  liste",
+      "  créer",
+      "  modifier",
+      "  supprimer",
+      "}"
+    ],
+    "description": "Déclare une API CRUD (français) / Declare a CRUD API (French)"
+  },
+  "Page - table (EN)": {
+    "prefix": "page-table",
+    "body": [
+      "page ${1:PageName} {",
+      "  show ${2:EntityName} as table title \"${3:Title}\"",
+      "}"
+    ],
+    "description": "Page listant une entité sous forme de tableau / Page listing an entity as a table"
+  },
+  "Page - tableau (FR)": {
+    "prefix": "page-tableau",
+    "body": [
+      "page ${1:NomPage} {",
+      "  afficher ${2:NomEntite} comme table titre \"${3:Titre}\"",
+      "}"
+    ],
+    "description": "Page listant une entité sous forme de tableau (français)"
+  },
+  "Page - form (EN)": {
+    "prefix": "page-form",
+    "body": [
+      "page ${1:PageName} {",
+      "  show ${2:EntityName} as form title \"${3:Title}\"",
+      "}"
+    ],
+    "description": "Page formulaire de création / Create-form page"
+  },
+  "Page - formulaire (FR)": {
+    "prefix": "page-formulaire",
+    "body": [
+      "page ${1:NomPage} {",
+      "  afficher ${2:NomEntite} comme formulaire titre \"${3:Titre}\"",
+      "}"
+    ],
+    "description": "Page formulaire de création (français)"
+  },
+  "App (EN)": {
+    "prefix": "app",
+    "body": [
+      "app ${1:AppName} {",
+      "  name: \"${2:App Name}\"",
+      "  lang: en",
+      "}"
+    ],
+    "description": "Bloc d'application (anglais) / Application block (English)"
+  },
+  "Application (FR)": {
+    "prefix": "application",
+    "body": [
+      "application ${1:NomApp} {",
+      "  nom: \"${2:Nom de l'app}\"",
+      "  langue: fr",
+      "}"
+    ],
+    "description": "Bloc d'application (français) / Application block (French)"
+  },
+  "Relation belongs_to / appartient_à": {
+    "prefix": "belongs-to",
+    "body": ["belongs_to ${1:EntityName}"],
+    "description": "Relation N-1 (anglais)"
+  },
+  "Relation appartient_à": {
+    "prefix": "appartient-a",
+    "body": ["appartient_à ${1:NomEntite}"],
+    "description": "Relation N-1 (français)"
+  }
+}

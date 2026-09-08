@@ -1,0 +1,60 @@
+// NOVA example — a tiny blogging app (English).
+// Compile it with:  nova compile examples/blog.en.nova -o build/blog
+
+app BlogDemo {
+  name: "NOVA Blog Demo"
+  description: "Minimal blog to demonstrate the NOVA DSL"
+  lang: en
+}
+
+entity Author {
+  field name: string required
+  field email: string required unique
+}
+
+entity Post {
+  field title: string required
+  field body: text required
+  field published: bool default = false
+  field published_at: datetime
+  belongs_to Author
+}
+
+entity Comment {
+  field body: text required
+  field author_name: string required
+  belongs_to Post
+}
+
+api Author {
+  list
+  create
+  update
+  delete
+}
+
+api Post {
+  list
+  get
+  create
+  update
+  delete
+}
+
+api Comment {
+  list
+  create
+  delete
+}
+
+page Posts {
+  show Post as table title "All posts"
+}
+
+page NewPost {
+  show Post as form title "Write a new post"
+}
+
+page PostCards {
+  show Post as card title "Latest posts"
+}

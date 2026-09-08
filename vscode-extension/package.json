@@ -1,0 +1,93 @@
+{
+  "name": "nova-lang",
+  "displayName": "NOVA Language (FR/EN)",
+  "description": "Coloration syntaxique, snippets et compilation pour le DSL bilingue NOVA. / Syntax highlighting, snippets and build tasks for the bilingual NOVA DSL.",
+  "version": "0.1.0",
+  "publisher": "encryon",
+  "license": "SEE LICENSE IN repo root",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages", "Snippets"],
+  "keywords": ["nova", "dsl", "fastapi", "reflex", "bilingual", "français"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "nova",
+        "aliases": ["NOVA", "nova"],
+        "extensions": [".nova"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/nova-file.svg",
+          "dark": "./icons/nova-file.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nova",
+        "scopeName": "source.nova",
+        "path": "./syntaxes/nova.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "nova",
+        "path": "./snippets/nova.code-snippets"
+      }
+    ],
+    "commands": [
+      {
+        "command": "nova.compile",
+        "title": "NOVA: Compiler ce fichier / Compile this file",
+        "category": "NOVA"
+      },
+      {
+        "command": "nova.check",
+        "title": "NOVA: Vérifier la syntaxe / Check syntax",
+        "category": "NOVA"
+      },
+      {
+        "command": "nova.newProject",
+        "title": "NOVA: Nouveau projet... / New project...",
+        "category": "NOVA"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "resourceLangId == nova",
+          "command": "nova.compile",
+          "group": "navigation@1"
+        },
+        {
+          "when": "resourceLangId == nova",
+          "command": "nova.check",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title/run": [
+        {
+          "when": "resourceLangId == nova",
+          "command": "nova.compile"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "NOVA",
+      "properties": {
+        "nova.cliPath": {
+          "type": "string",
+          "default": "nova",
+          "description": "Chemin vers l'exécutable `nova` (installé via `pip install -e .` dans le framework). / Path to the `nova` executable (installed via `pip install -e .` in the framework)."
+        },
+        "nova.outputDir": {
+          "type": "string",
+          "default": "build",
+          "description": "Dossier de sortie du compilateur, relatif au fichier .nova. / Compiler output directory, relative to the .nova file."
+        }
+      }
+    }
+  }
+}

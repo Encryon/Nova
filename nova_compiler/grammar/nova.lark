@@ -1,0 +1,97 @@
+// ============================================================================
+// NOVA DSL grammar — bilingual FR/EN business-intent language.
+// Every keyword has an English and a French spelling; both compile to the
+// exact same AST node, so a .nova file can freely mix EN/FR blocks.
+// ============================================================================
+
+start: statement*
+
+statement: app_decl
+         | entity_decl
+         | api_decl
+         | page_decl
+
+// ---------------------------------------------------------------- app -----
+// Optional single block describing the application itself.
+app_decl: APP_KW NAME "{" app_prop* "}"
+app_prop: PROP_NAME ":" value
+
+// ------------------------------------------------------------- entity -----
+entity_decl: ENTITY_KW NAME "{" entity_member* "}"
+entity_member: field_decl
+             | relation_decl
+field_decl: FIELD_KW NAME ":" type_ref modifier*
+modifier: REQUIRED_KW
+        | UNIQUE_KW
+        | DEFAULT_KW "=" value
+        | PATTERN_KW "=" STRING
+type_ref: TYPE_STRING
+        | TYPE_TEXT
+        | TYPE_INT
+        | TYPE_FLOAT
+        | TYPE_BOOL
+        | TYPE_DATE
+        | TYPE_DATETIME
+        | NAME                 // reference to another entity (relation by field)
+relation_decl: HAS_MANY_KW NAME
+             | BELONGS_TO_KW NAME
+
+// ---------------------------------------------------------------- api -----
+api_decl: API_KW NAME "{" api_action* "}"
+api_action: LIST_KW | CREATE_KW | UPDATE_KW | DELETE_KW | GET_KW
+
+// --------------------------------------------------------------- page -----
+page_decl: PAGE_KW NAME "{" page_stmt* "}"
+page_stmt: SHOW_KW NAME (AS_KW display_mode)? (TITLE_KW STRING)?
+display_mode: TABLE_KW | FORM_KW | CARD_KW
+
+value: STRING | NUMBER | BOOL_TRUE | BOOL_FALSE | NAME
+
+// ================================================== bilingual terminals ===
+APP_KW: "app" | "application"
+ENTITY_KW: "entity" | "entité" | "entite"
+FIELD_KW: "field" | "champ"
+REQUIRED_KW: "required" | "requis"
+UNIQUE_KW: "unique"
+DEFAULT_KW: "default" | "defaut" | "défaut" | "par_defaut" | "par_défaut"
+PATTERN_KW: "pattern" | "motif" | "regex"
+HAS_MANY_KW: "has_many" | "possede_plusieurs" | "possède_plusieurs"
+BELONGS_TO_KW: "belongs_to" | "appartient_a" | "appartient_à"
+
+API_KW: "api"
+LIST_KW: "list" | "liste"
+CREATE_KW: "create" | "creer" | "créer"
+UPDATE_KW: "update" | "modifier" | "mettre_a_jour" | "mettre_à_jour"
+DELETE_KW: "delete" | "supprimer"
+GET_KW: "get" | "obtenir" | "lire"
+
+PAGE_KW: "page"
+SHOW_KW: "show" | "afficher"
+AS_KW: "as" | "comme"
+TITLE_KW: "title" | "titre"
+TABLE_KW: "table"
+FORM_KW: "form" | "formulaire"
+CARD_KW: "card" | "carte"
+
+TYPE_STRING: "string" | "chaine" | "chaîne"
+TYPE_TEXT: "text" | "texte"
+TYPE_INT: "int" | "integer" | "entier"
+TYPE_FLOAT: "float" | "decimal" | "décimal"
+TYPE_BOOL: "bool" | "boolean" | "booleen" | "booléen"
+TYPE_DATE: "date"
+TYPE_DATETIME: "datetime" | "date_heure"
+
+BOOL_TRUE: "true" | "vrai"
+BOOL_FALSE: "false" | "faux"
+
+PROP_NAME: "name" | "nom" | "description" | "lang" | "langue" | "version"
+
+NAME: /[^\W\d]\w*/
+STRING: /"[^"]*"/
+NUMBER: /-?\d+(\.\d+)?/
+
+COMMENT: /\/\/[^\n]*/
+
+%import common.WS
+%ignore WS
+%ignore COMMENT

@@ -1,0 +1,60 @@
+// Exemple NOVA — un petit blog (français).
+// Compilez-le avec :  nova compile examples/blog.fr.nova -o build/blog
+
+application DemoBlog {
+  nom: "Démo Blog NOVA"
+  description: "Blog minimal pour démontrer le DSL NOVA"
+  langue: fr
+}
+
+entité Auteur {
+  champ nom: chaine requis
+  champ email: chaine requis unique
+}
+
+entité Article {
+  champ titre: chaine requis
+  champ contenu: texte requis
+  champ publie: booleen default = false
+  champ publie_le: date_heure
+  appartient_à Auteur
+}
+
+entité Commentaire {
+  champ contenu: texte requis
+  champ nom_auteur: chaine requis
+  appartient_à Article
+}
+
+api Auteur {
+  liste
+  créer
+  modifier
+  supprimer
+}
+
+api Article {
+  liste
+  obtenir
+  créer
+  modifier
+  supprimer
+}
+
+api Commentaire {
+  liste
+  créer
+  supprimer
+}
+
+page Articles {
+  afficher Article comme table titre "Tous les articles"
+}
+
+page NouvelArticle {
+  afficher Article comme formulaire titre "Rédiger un article"
+}
+
+page ArticlesCartes {
+  afficher Article comme carte titre "Derniers articles"
+}

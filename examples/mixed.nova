@@ -1,0 +1,38 @@
+// NOVA accepte le français et l'anglais dans le MÊME fichier : chaque
+// mot-clé est reconnu dans les deux langues et compile vers le même AST.
+// NOVA accepts French and English in the SAME file: every keyword is
+// recognized in both languages and compiles to the exact same AST.
+
+app MixedDemo {
+  name: "Mixed FR/EN Demo"
+  lang: en
+}
+
+entity Product {
+  field name: string required
+  field price: float required
+}
+
+entité Commande {
+  champ quantite: entier requis
+  appartient_à Product
+}
+
+api Product {
+  list
+  create
+}
+
+api Commande {
+  liste
+  créer
+  supprimer
+}
+
+page Products {
+  show Product as table
+}
+
+page Commandes {
+  afficher Commande comme formulaire
+}

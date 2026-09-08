@@ -1,0 +1,131 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "NOVA",
+  "scopeName": "source.nova",
+  "fileTypes": ["nova"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#booleans" },
+    { "include": "#block-keywords" },
+    { "include": "#field-keyword" },
+    { "include": "#type-keywords" },
+    { "include": "#modifier-keywords" },
+    { "include": "#action-keywords" },
+    { "include": "#display-keywords" },
+    { "include": "#relation-keywords" },
+    { "include": "#prop-keywords" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.nova",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.nova",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "name": "constant.character.escape.nova", "match": "\\\\." }]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.nova",
+          "match": "\\b-?\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "booleans": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.nova",
+          "match": "\\b(true|vrai|false|faux)\\b"
+        }
+      ]
+    },
+    "block-keywords": {
+      "comment": "Déclarations de blocs de premier niveau / top-level block declarations",
+      "patterns": [
+        {
+          "name": "keyword.control.nova",
+          "match": "\\b(app|application|entity|entité|entite|api|page)\\b"
+        }
+      ]
+    },
+    "field-keyword": {
+      "patterns": [
+        {
+          "name": "storage.modifier.nova",
+          "match": "\\b(field|champ)\\b"
+        }
+      ]
+    },
+    "type-keywords": {
+      "comment": "Types scalaires NOVA / NOVA scalar types",
+      "patterns": [
+        {
+          "name": "storage.type.nova",
+          "match": "\\b(string|chaine|chaîne|text|texte|int|integer|entier|float|decimal|décimal|bool|boolean|booleen|booléen|date|datetime|date_heure)\\b"
+        }
+      ]
+    },
+    "modifier-keywords": {
+      "patterns": [
+        {
+          "name": "storage.modifier.other.nova",
+          "match": "\\b(required|requis|unique|default|defaut|défaut|par_defaut|par_défaut)\\b"
+        }
+      ]
+    },
+    "relation-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.other.relation.nova",
+          "match": "\\b(has_many|possede_plusieurs|possède_plusieurs|belongs_to|appartient_a|appartient_à)\\b"
+        }
+      ]
+    },
+    "action-keywords": {
+      "comment": "Actions CRUD dans un bloc api / CRUD actions inside an api block",
+      "patterns": [
+        {
+          "name": "support.function.nova",
+          "match": "\\b(list|liste|create|creer|créer|update|modifier|mettre_a_jour|mettre_à_jour|delete|supprimer|get|obtenir|lire)\\b"
+        }
+      ]
+    },
+    "display-keywords": {
+      "comment": "Mots-clés des blocs page / page-block keywords",
+      "patterns": [
+        {
+          "name": "keyword.other.display.nova",
+          "match": "\\b(show|afficher|as|comme|title|titre|table|form|formulaire|card|carte)\\b"
+        }
+      ]
+    },
+    "prop-keywords": {
+      "patterns": [
+        {
+          "name": "variable.parameter.nova",
+          "match": "\\b(name|nom|description|lang|langue|version)\\b"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.definition.block.nova", "match": "[{}]" },
+        { "name": "punctuation.separator.nova", "match": "[:=]" }
+      ]
+    }
+  }
+}

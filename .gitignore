@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+build/
+.web/
+node_modules/
+*.db
+.pytest_cache/
+*.vsix
