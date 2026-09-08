@@ -2,10 +2,10 @@ Business Source License 1.1
 
 Parameters
 
-Licensor:             Encryon (ENC-SOFT)
+Licensor:             ENC-SOFT
 Licensed Work:        NOVA Framework (this repository, all files unless
                        otherwise noted), version 0.2.0 and later
-                       Copyright © 2026 Encryon (ENC-SOFT). All rights reserved.
+                       Copyright © 2026 ENC-SOFT. All rights reserved.
 Additional Use Grant:  You may use, copy, modify, and create derivative
                        works of the Licensed Work for any non-commercial
                        purpose, free of charge. Non-commercial purposes
@@ -17,7 +17,7 @@ Additional Use Grant:  You may use, copy, modify, and create derivative
                        purpose — including internal business use, use in a
                        product or service you sell, or use in a hosted
                        offering — only if you have first obtained a
-                       commercial license from Encryon (ENC-SOFT). Contact
+                       commercial license from ENC-SOFT. Contact
                        contact@enc-soft.com to obtain one.
 Change Date:           Four years from the publication date of each
                        version of the Licensed Work. For version 0.2.0,
@@ -120,7 +120,7 @@ Résumé informel (sans valeur légale) / Informal summary (not legally binding)
 maintenant. Vous pouvez l'utiliser gratuitement pour un usage
 non-commercial (projets personnels, formation, évaluation, contributions
 au projet). Pour un usage commercial (en entreprise, dans un produit ou
-service vendu, en hébergement), une licence commerciale auprès d'Encryon
+service vendu, en hébergement), une licence commerciale auprès d'ENC-SOFT
 est nécessaire. Le 2030-09-08 (et à chaque date anniversaire équivalente
 pour les versions suivantes), la version concernée bascule
 automatiquement sous licence Apache 2.0, totalement permissive. Le texte
@@ -130,7 +130,7 @@ légal ci-dessus (en anglais) fait foi en cas de litige.
 now. You can use it for free for non-commercial purposes (personal
 projects, education, evaluation, contributions to the project). For
 commercial use (inside a business, in a product or service you sell, or
-as a hosted offering), a commercial license from Encryon is required. On
+as a hosted offering), a commercial license from ENC-SOFT is required. On
 2030-09-08 (and on the equivalent anniversary for each later version),
 that version automatically converts to the fully permissive Apache 2.0
 license. The legal text above governs in case of any dispute.
