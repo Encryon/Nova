@@ -73,6 +73,61 @@ PROP_NAMES = {
     "version": "version",
     "css": "css", "feuille_style": "css", "stylesheet": "css",
     "hoja_estilo": "css", "stildatei": "css", "foglio_stile": "css", "folha_estilo": "css",
+    "database": "database", "base_donnees": "database", "base_données": "database",
+    "base_datos": "database", "datenbank": "database", "banco_dados": "database",
+}
+
+# ---- bloc `application { database: ... }` (moteur SQL, tâche #28) --------
+# Les noms de moteur eux-mêmes sont des noms propres (pas de traduction par
+# langue, contrairement au reste du DSL) : quelques alias usuels tolérés
+# (`postgres` pour `postgresql`, `mssql`/`sql_server` pour `sqlserver`) pour
+# rester tolérant, mais la valeur canonique (à droite) est la seule utilisée
+# ensuite par tout le codegen (`NovaProgram.database_engine`, voir
+# codegen/api_fastapi.py::_generate_database, codegen/docker.py::_compose,
+# codegen/k8s.py::_values_yaml) : driver requirements.txt à installer, URL de
+# connexion par défaut, service `db` docker-compose. Absent de `application
+# { ... }` = "sqlite" (comportement historique inchangé, aucune dépendance
+# supplémentaire).
+DATABASE_ENGINES = {
+    "sqlite": "sqlite",
+    "postgresql": "postgresql", "postgres": "postgresql", "postgre": "postgresql",
+    "mysql": "mysql", "mariadb": "mysql", "maria": "mysql",
+    "sqlserver": "sqlserver", "sql_server": "sqlserver", "mssql": "sqlserver",
+    "oracle": "oracle",
+    # NoSQL (tâche #29, voir codegen/api_mongo.py) : backend généré
+    # entièrement différent (Beanie/Motor), pas un simple driver
+    # supplémentaire — voir generate_backend_mongo, jamais DB_DRIVER_
+    # REQUIREMENTS/_generate_database ci-dessous (spécifiques SQLModel/SQL).
+    "mongodb": "mongodb", "mongo": "mongodb",
+}
+
+# URL de connexion par défaut par moteur (utilisée UNIQUEMENT si
+# NOVA_DATABASE_URL n'est pas fournie à l'exécution, voir codegen/
+# api_fastapi.py::_generate_database) : identifiants de développement en
+# clair, jamais destinés à la production (toujours surchargeables via
+# variable d'environnement / Secret Helm). L'hôte "db" et ces mêmes
+# identifiants correspondent au service `db` docker-compose généré par
+# codegen/docker.py::_compose pour tout moteur autre que sqlite — une seule
+# source de vérité partagée par les deux générateurs.
+DB_DEFAULT_URLS = {
+    "sqlite": "sqlite:///./nova.db",
+    "postgresql": "postgresql+psycopg2://nova:nova@db:5432/nova",
+    "mysql": "mysql+pymysql://nova:nova@db:3306/nova",
+    "sqlserver": (
+        "mssql+pyodbc://sa:NovaDev123!@db:1433/nova"
+        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+    ),
+    "oracle": "oracle+oracledb://system:nova@db:1521/?service_name=FREEPDB1",
+    "mongodb": "mongodb://nova:nova@db:27017/nova?authSource=admin",
+}
+
+# Driver Python à ajouter à requirements.txt selon le moteur choisi — sqlite
+# n'en a besoin d'aucun (module `sqlite3` de la stdlib).
+DB_DRIVER_REQUIREMENTS = {
+    "postgresql": "psycopg2-binary>=2.9",
+    "mysql": "pymysql>=1.1",
+    "sqlserver": "pyodbc>=5.0",
+    "oracle": "oracledb>=2.0",
 }
 
 # ---- modificateurs de champ (`required`/`unique`/`pattern`) --------------
@@ -145,7 +200,16 @@ CHART_TYPES = {
     "line": "line", "ligne": "line", "linea": "line", "línea": "line", "linie": "line", "linha": "line",
     "pie": "pie", "camembert": "pie", "tarta": "pie", "torta": "pie", "kreis": "pie", "pizza": "pie", "circular": "pie",
     "area": "area", "aire": "area", "área": "area", "flaeche": "area", "fläche": "area",
+    "radar": "radar", "radial": "radar", "araignee": "radar", "araignée": "radar", "radarchart": "radar",
+    "scatter": "scatter", "nuage": "scatter", "nuage_de_points": "scatter", "dispersion": "scatter",
+    "streudiagramm": "scatter", "punktdiagramm": "scatter", "dispersao": "scatter", "dispersão": "scatter",
 }
+# Types de graphique acceptant plusieurs séries (`axe_y` avec plusieurs
+# champs séparés par des virgules) : bar/line/area se prêtent naturellement
+# à un rendu multi-séries superposé ; pie (un seul anneau) et radar/scatter
+# (un seul jeu de points par rapport à axe_x) n'ont pas de rendu multi-séries
+# simple dans rx.recharts — restreint volontairement, voir _validate_charts.
+CHART_MULTI_SERIES_TYPES = {"bar", "line", "area"}
 
 
 # ---- bloc `email { ... }` (configuration SMTP) ---------------------------

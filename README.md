@@ -10,7 +10,7 @@
 ![Statut](https://img.shields.io/badge/statut-fair--source%20/%20open-6e4bf0)
 ![Version](https://img.shields.io/badge/version-0.3.0-6e4bf0)
 ![Python](https://img.shields.io/badge/python-3.11%2B-6e4bf0)
-![Tests](https://img.shields.io/badge/tests-65%20passed-2f9e6e)
+![Tests](https://img.shields.io/badge/tests-162%20passed-2f9e6e)
 ![Licence](https://img.shields.io/badge/licence-BSL%201.1%20→%20Apache%202.0-a8630f)
 
 [🇫🇷 Français](#-français) · [🇬🇧 English](#-english) · [Démarrage rapide](#démarrage-rapide--quickstart) · [Architecture](#architecture-du-compilateur--compiler-architecture) · [Référence des mots-clés (6 langues)](docs/REFERENCE.md) · [Licence](#licence--license)
@@ -182,6 +182,7 @@ pour un fichier qui mélange français et anglais.
 | Trier par | `trier_par` | `sort_by` / `order_by` |
 | Limite | `limite` | `limit` |
 | Types | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure`, `fichier`, `image`, `couleur` | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime`, `file`, `image`, `color` |
+| Base de données | `base_donnees` / `base_données` | `database` |
 
 Ce tableau ne couvre que FR/EN pour rester lisible ; espagnol, allemand,
 italien et portugais sont acceptés pour les mêmes mots-clés (y compris
@@ -202,6 +203,55 @@ Génère automatiquement une contrainte Pydantic (`pattern=r"..."`) sur le
 modèle de table SQLModel et sur les schémas `Create`/`Update` — l'API
 rejette une valeur invalide avec un `422` sans code de validation à
 écrire à la main.
+
+### Base de données : moteur SQL configurable et backend NoSQL MongoDB
+
+Par défaut, le projet généré utilise **SQLite** (fichier local, aucune
+dépendance externe). Le bloc `application` accepte une propriété
+`base_donnees`/`base_données` (`database` en anglais) pour choisir un
+autre moteur :
+
+```
+application MonApp {
+    base_donnees: postgresql
+}
+```
+
+Valeurs reconnues (avec alias courants, insensibles à la casse) :
+`sqlite` (défaut), `postgresql`/`postgres`/`postgre`, `mysql`/`mariadb`/
+`maria`, `sqlserver`/`sql_server`/`mssql`, `oracle`, et `mongodb`/`mongo`.
+Une valeur inconnue est rejetée à la compilation avec la liste des
+valeurs valides.
+
+**Moteurs SQL (`postgresql`, `mysql`, `sqlserver`, `oracle`)** —
+le backend généré reste un projet SQLModel classique : l'URL de connexion
+par défaut, la dépendance pilote requise (`psycopg2-binary`, `pymysql`,
+`pyodbc`, `oracledb`) et le service `db:` du `docker-compose.yml`
+(image officielle, identifiants de dev, volume persistant) sont ajustés
+automatiquement pour le moteur choisi ; le chart Helm (`values.yaml`)
+reçoit la même URL par défaut. `sqlite` ne change rien par rapport au
+comportement historique (pas de service `db:`, volume `backend_data`
+partagé avec les uploads).
+
+**Backend NoSQL (`mongodb`/`mongo`)** — chemin de génération entièrement
+différent : modèles [Beanie](https://beanie-odm.dev/) (`Document` async
+sur Motor/`AsyncIOMotorClient`) au lieu de tables SQLModel, routes CRUD
+`async`/`await`, identifiants sous forme de chaîne (ObjectId Mongo
+sérialisé) au lieu d'entiers auto-incrémentés, contrainte `unique`
+traduite en index Mongo unique (`pymongo.errors.DuplicateKeyError`
+intercepté et renvoyé en `422`, comme le backend SQL). L'authentification
+JWT, les notifications email, l'upload de fichiers, le contenu
+multilingue, `belongs_to` et les graphiques sur entité sont **tous
+supportés** et réutilisent le code backend-agnostique existant. En
+revanche, dans ce MVP, `database: mongodb` est **incompatible** avec :
+
+- le bloc `requete`/`query` (filtres déclaratifs),
+- le bloc `calendar`/`calendrier`,
+- les relations `has_many`/`possede_plusieurs` matérialisées.
+
+Ces combinaisons sont détectées et rejetées **à la compilation** (erreur
+explicite listant le(s) bloc(s) en cause) plutôt que de générer un projet
+Mongo silencieusement incomplet — au-delà, `routers_custom/`.
 
 ### Style et CSS
 
@@ -269,10 +319,13 @@ api Produit {
 
 En production, définissez la variable d'environnement
 `NOVA_JWT_SECRET` (le `docker-compose.yml` généré la référence déjà) —
-la valeur par défaut ne doit jamais être utilisée telle quelle. Le
-champ `role` de `/auth/register` est actuellement libre (n'importe qui
-peut s'inscrire comme `admin`) : à restreindre côté `routers_custom/`
-avant tout déploiement public.
+la valeur par défaut ne doit jamais être utilisée telle quelle.
+`/auth/register` ne porte pas de champ `role` : seul le tout premier
+compte créé sur le projet devient automatiquement `admin` (bootstrap
+sans identifiants par défaut à changer), tous les suivants reçoivent le
+rôle par défaut ; un admin peut ensuite promouvoir un autre compte via
+`PATCH /auth/users/{id}/role`. Pensez à créer votre propre compte
+immédiatement après le déploiement.
 
 ### Requêtes déclaratives (`requete` / `query`)
 
@@ -291,8 +344,23 @@ requete ProduitsChers sur Produit {
 Génère `GET /requetes/produits-chers`, une requête SQLAlchemy lisible
 (`select(...).where(...).order_by(...).limit(...)`) — pas de chaîne SQL
 à écrire. Les comparateurs disponibles : `>`, `<`, `>=`, `<=`, `==`,
-`!=`. Pour des filtres combinés, des jointures ou une logique plus
-riche, `routers_custom/` reste le point d'extension prévu.
+`!=`. Plusieurs `filtre:` au niveau racine se combinent en ET ; un bloc
+`ou: { filtre: ... filtre: ... }` regroupe des filtres combinés en OU
+(le groupe entier restant combiné en ET avec le reste, plusieurs blocs
+`ou:` possibles) :
+
+```
+requete ProduitsAConsulter sur Produit {
+  filtre: stock > 0
+  ou: {
+    filtre: prix < 20
+    filtre: promo == vrai
+  }
+}
+```
+
+Reste limité à une seule entité par requête (pas de jointure) ; pour
+des jointures ou une logique plus riche, `routers_custom/`.
 
 ### Graphiques (`chart`)
 
@@ -325,10 +393,14 @@ chart TopProduitsChers sur ProduitsChers {
 }
 ```
 
-Types disponibles (`type:`) : `bar`/`barres`/`barra`/`balken`,
-`line`/`ligne`/`linea`/`linie`, `pie`/`camembert`/`torta`/`kreis`,
-`area`/`aire`/`área`/`fläche` — chacun avec ses synonymes dans les 6
-langues. Une référence `sur` inconnue (ni entité ni requête) est
+Types disponibles (`type:`) : `bar`/`barres`, `line`/`ligne`,
+`pie`/`camembert`, `area`/`aire`, `radar`/`araignée`,
+`scatter`/`nuage_de_points` — chacun avec ses synonymes dans les 6
+langues. `axe_y` accepte plusieurs champs séparés par des virgules pour
+un graphique multi-séries (`axe_y: ventes, couts, marge`), sur les
+types qui s'y prêtent (`bar`/`line`/`area` — rejeté à la compilation
+sur `pie`/`radar`/`scatter`, qui n'ont pas de rendu multi-séries
+naturel). Une référence `sur` inconnue (ni entité ni requête) est
 détectée à la compilation (`nova check`/`nova compile`), pas au
 premier chargement de la page.
 
@@ -354,7 +426,12 @@ entité Produit {
   `fichier`/`image` existe quelque part dans le projet), stocké sous un
   nom unique dans le volume `backend_data` déjà utilisé par SQLite, et
   re-servi statiquement sous `/files/<nom>`. Le champ stocke simplement
-  cette URL (`str`) — aucune colonne binaire en base.
+  cette URL (`str`) — aucune colonne binaire en base. Taille max 10 Mio
+  par défaut (`NOVA_UPLOAD_MAX_BYTES`), extensions autorisées
+  restreintes par défaut (`NOVA_UPLOAD_ALLOWED_EXTENSIONS`, rejet en
+  415 hors liste), et une image dépassant 2000px de large est
+  automatiquement redimensionnée (Pillow, `NOVA_UPLOAD_MAX_IMAGE_DIMENSION`)
+  — les trois réglages sont surchargeables sans recompiler.
 - **`couleur`/`color`** : un sélecteur de couleur natif
   (`type="color"`).
 - Les types existants **`date`**, **`date_heure`**/`datetime` et
@@ -422,19 +499,36 @@ généré. Comportements à connaître :
   soit déclaré quelque part dans le fichier — sinon `nova check`/`nova
   compile` refuse de compiler plutôt que de produire un projet dont la
   notification échouerait silencieusement.
-- Le message envoyé est un texte simple bilingue généré automatiquement
-  (sujet + corps mentionnant l'entité et son id) — pas de template HTML
-  ni de pièce jointe dans ce MVP ; pour un contenu personnalisé, appelez
-  `send_email(subject=..., body=..., to=...)` depuis `routers_custom/`.
+- L'email envoyé est HTML (avec repli texte brut, `multipart/alternative`) ;
+  `destinataire: <champ>` (alias `recipient:`) sur `api`, à côté de
+  `notifier:`, envoie à l'adresse contenue dans ce champ de
+  l'enregistrement concerné plutôt qu'au destinataire fixe du bloc
+  `email` ; `piece_jointe: <champ>` (alias `attachment:`) joint le
+  fichier référencé par un champ `fichier`/`image` de l'enregistrement :
+
+  ```
+  api Commande {
+    creer
+    notifier: creer
+    destinataire: email_client
+    piece_jointe: facture
+  }
+  ```
+
+  Le contenu du message (sujet + corps HTML bilingue mentionnant
+  l'entité et son id) reste généré automatiquement — pas de DSL pour
+  personnaliser le texte lui-même dans ce MVP ; pour un contenu
+  entièrement sur mesure, appelez `send_email(subject=..., body=...,
+  to=..., attachment_path=...)` depuis `routers_custom/`.
 
 ### Calendrier (`calendar`)
 
 Un bloc `calendar <Nom> sur <Entité> { ... }` génère automatiquement sa
 propre page Reflex (route `/calendriers/<nom>`, lien ajouté à la barre de
-navigation) affichant une **vue mensuelle** des enregistrements de
-l'entité — grille calculée côté serveur avec la seule bibliothèque
-standard Python (`calendar`, `datetime`), **aucune dépendance JS
-supplémentaire** :
+navigation) affichant les enregistrements de l'entité en **vue mois,
+semaine ou jour** (bouton de bascule, tout recalculé côté serveur) —
+grille calculée avec la seule bibliothèque standard Python (`calendar`,
+`datetime`), **aucune dépendance JS supplémentaire** :
 
 ```
 calendrier Ajouts sur Produit {
@@ -452,25 +546,36 @@ calendrier Ajouts sur Produit {
   concerné (les titres du même jour sont regroupés, séparés par des
   virgules) — si omis, un simple marqueur « • » signale qu'un jour a des
   enregistrements.
-- Boutons `<`/`>` pour naviguer entre les mois (tout est recalculé côté
-  serveur, aucun rechargement de page) ; protection JWT héritée
+- Boutons `<`/`>` pour naviguer (mois, semaine ou jour selon la vue
+  active, aucun rechargement de page) ; protection JWT héritée
   automatiquement si `api <Entité> { ... proteger: <rôle> }` est présent,
   comme pour `chart`.
+- Export iCalendar : chaque calendrier expose aussi une route
+  `GET /ics/<nom>.ics` (format RFC 5545, sans dépendance supplémentaire)
+  — à abonner directement dans Google Calendar/Outlook/etc.
 - Une référence `sur` inconnue, un `champ_date` qui n'est pas un champ
   `date`/`date_heure` de l'entité, ou un `champ_titre` inexistant sont
   détectés à la compilation (`nova check`/`nova compile`), jamais au
   premier chargement de la page.
 - Vue lecture seule dans ce MVP (pas de création/déplacement
-  d'événement directement depuis le calendrier) — utilisez la page
-  `formulaire` de l'entité pour ajouter un enregistrement.
+  d'événement par glisser-déposer directement sur la grille) — utilisez
+  la page `formulaire` de l'entité pour ajouter un enregistrement.
 
 ### Contenu multilingue (`traductions` + champ `multilingue`)
 
-Deux mécanismes complémentaires, tous deux couvrant **toujours les 6
-langues du DSL** (pas de sous-ensemble configurable par projet dans ce
-MVP), avec un **sélecteur de langue** ajouté automatiquement à la barre
-de navigation (langue courante persistée dans un cookie navigateur,
-comme le jeton JWT) :
+Deux mécanismes complémentaires, avec un **sélecteur de langue** ajouté
+automatiquement à la barre de navigation (langue courante persistée
+dans un cookie navigateur, comme le jeton JWT). Par défaut, les 6
+langues du DSL sont actives ; `application { langues: fr, en }` (alias
+`languages`/`idiomas`/`sprachen`/`lingue`) restreint le projet généré à
+un sous-ensemble (colonnes `multilingue`, entrées `traductions` et
+sélecteur de langue frontend ne portent alors plus que ces langues) :
+
+```
+application MaBoutique {
+  langues: fr, en
+}
+```
 
 **Textes d'interface** (titres, libellés...) : un bloc `traductions { ...
 }` centralisé, référencé par clé depuis n'importe quel `titre`/`title` de
@@ -493,9 +598,10 @@ page Produits {
 }
 ```
 
-Les 6 langues (`fr`/`en`/`es`/`de`/`it`/`pt`) sont **requises** pour
-chaque entrée — une langue manquante est détectée à la compilation, pas
-au premier affichage de la page. `titre "Texte littéral"` (entre
+Chaque entrée doit fournir **toutes les langues actives** du projet
+(les 6 par défaut, ou le sous-ensemble de `application { langues: ...
+}`) — une langue manquante est détectée à la compilation, pas au
+premier affichage de la page. `titre "Texte littéral"` (entre
 guillemets) reste disponible en parallèle et affiche le même texte quelle
 que soit la langue choisie, comme avant cette fonctionnalité.
 
@@ -562,61 +668,68 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-89 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
+162 tests : équivalence structurelle FR/EN, synonymes ES/DE/IT/PT,
 validité syntaxique du code généré, clés étrangères, setters de
 formulaire Reflex, validation regex, style CSS, graphiques (`chart`,
-4 types, source entité/requête), champs riches `fichier`/`image`/
+6 types dont séries multiples, source entité/requête), champs riches `fichier`/`image`/
 `couleur` (upload, pickers natifs, rendu tableau/carte enrichi),
 notifications email (`email` + `notifier:`), calendrier (`calendar`,
 résolution du champ date par défaut, alias multilingues, cas d'erreur),
 contenu multilingue (`traductions`, champ `multilingue`, alias dans les
-6 langues, cas d'erreur), points d'extension custom — dont plusieurs
-tests qui **importent réellement** le backend et le frontend générés
-(pas seulement une vérification de syntaxe) : flux JWT complet
-(inscription, connexion, rôles, routes protégées) et route de requête
-déclarative via `TestClient`, upload de fichier réel servi par le
-montage statique, notification email envoyée sur create/delete
-(connexion SMTP simulée, reste du code réellement exécuté) et échec
-SMTP n'interrompant jamais la requête, et construction effective de
-l'arbre de composants Reflex de chaque page (graphique, calendrier
-avec grille de jours calculée côté serveur, formulaire avec zone
-d'upload, carte, sélecteur de langue et fonction de traduction
-réactive `t_<cle>()`).
+6 langues, cas d'erreur), génération du chart Helm (ConfigMap/Secret/PVC,
+gabarits conditionnels selon auth/uploads/email), moteur de base de
+données SQL configurable (Postgres/MySQL/SQL Server/Oracle : pilote,
+service `docker-compose`, `values.yaml` Helm), backend NoSQL MongoDB
+(modèles Beanie, rejet à la compilation des fonctionnalités non
+supportées), points d'extension custom — dont plusieurs tests qui
+**importent réellement** le backend et le frontend générés (pas
+seulement une vérification de syntaxe) : flux JWT complet (inscription,
+connexion, rôles, routes protégées) et route de requête déclarative via
+`TestClient`, upload de fichier réel servi par le montage statique,
+notification email envoyée sur create/delete (connexion SMTP simulée,
+reste du code réellement exécuté) et échec SMTP n'interrompant jamais la
+requête, construction effective de l'arbre de composants Reflex de
+chaque page (graphique, calendrier avec grille de jours calculée côté
+serveur, formulaire avec zone d'upload, carte, sélecteur de langue et
+fonction de traduction réactive `t_<cle>()`), et flux CRUD + auth JWT +
+unicité complet sur le backend Mongo généré via `TestClient` avec un
+serveur MongoDB simulé (`mongomock-motor`).
 
 ### Limites connues du MVP
 
-- Pluriel anglais naïf pour les noms de tables/routes.
-- Une seule entité principale par bloc `page` (pas de composition
-  multi-entités sur une même page).
-- `has_many` est informatif (pas de colonne générée) ; seul
-  `belongs_to` produit une clé étrangère.
-- La validation `motif`/`pattern` ne couvre qu'un seul champ à la fois ;
-  toute règle croisant plusieurs champs passe par `routers_custom/`.
-- Le bloc `requete`/`query` ne couvre qu'un filtre simple par comparateur
-  sur une seule entité (pas de `ET`/`OU` combinés, pas de jointure) ;
-  au-delà, `routers_custom/`.
-- Le bloc `chart` se limite volontairement à 4 types (barres/lignes/
-  camembert/aires) et une seule série par graphique ; pour un tableau de
-  bord plus riche, `frontend/<app>/custom.py`.
-- `/auth/register` laisse le rôle libre par défaut — à restreindre avant
-  un déploiement public (voir la section Authentification ci-dessus).
-- Le chart Helm est un squelette à adapter (registre d'images, ingress réel).
-- Les fichiers/images uploadés sont stockés sur disque côté backend (volume
-  `backend_data`) sans limite de taille/type appliquée par défaut, ni
-  redimensionnement d'image — à ajouter via `routers_custom/` avant un
-  déploiement public si nécessaire.
-- Le bloc `email`/`notifier:` envoie un texte simple bilingue généré
-  automatiquement (sujet + id de l'enregistrement) — pas de template
-  HTML, de pièce jointe, ni de destinataire dynamique par enregistrement
-  dans ce MVP ; pour un contenu personnalisé, `routers_custom/`.
-- Le bloc `calendar` est une vue mensuelle en lecture seule (pas de
-  création/déplacement d'événement par glisser-déposer directement sur
-  la grille, pas de vue semaine/jour) ; pour une interaction plus riche,
-  `frontend/<app>/custom.py`.
-- Le contenu multilingue (`traductions`, champ `multilingue`) couvre
-  toujours les 6 langues du DSL (pas de sous-ensemble configurable par
-  projet) ; pas de traduction assistée/automatique — chaque texte est
-  saisi à la main dans le fichier `.nova`.
+- `has_many` ne génère toujours pas de colonne (la clé étrangère vit sur
+  l'entité `belongs_to`, côté "plusieurs") ; `liste`/`obtenir` exposent
+  désormais un résumé texte des enregistrements liés (`<entite>_text`,
+  valeurs jointes par virgule) plutôt qu'une simple mention informative
+  — mais pas encore une sous-liste interactive d'objets complets ; pour
+  ça, `frontend/<app>/custom.py`.
+- La validation `motif`/`pattern` reste limitée à un seul champ ; pour
+  une règle comparant deux champs entre eux, un bloc
+  `validation <Nom> sur <Entité> { regle: champA > champB message: "..."
+  }` (une ou plusieurs règles) est disponible depuis peu — au-delà d'une
+  comparaison directe entre deux champs (calcul, plus de deux champs),
+  `routers_custom/`.
+- Le bloc `requete`/`query` reste limité à une seule entité (pas de
+  jointure) ; au-delà, `routers_custom/`.
+- Le chart Helm génère ConfigMap/Secret/PVC et un `values.yaml` complet,
+  mais reste un point de départ à adapter (registre d'images, ingress réel,
+  autoscaling fin).
+- `database: mongodb` (backend NoSQL) est incompatible dans ce MVP avec
+  `requete`/`query`, `calendar`/`calendrier` et les relations `has_many`
+  matérialisées — rejeté explicitement à la compilation (voir la section
+  Base de données ci-dessus) plutôt que de générer un projet incomplet.
+- Le contenu HTML de l'email envoyé par `notifier:` (sujet + corps) reste
+  généré automatiquement — pas de DSL pour personnaliser le texte lui-même
+  dans ce MVP ; pour un contenu entièrement sur mesure, `routers_custom/`.
+- Le bloc `calendar` reste en lecture seule (pas de création/déplacement
+  d'événement par glisser-déposer directement sur la grille) ; pour une
+  interaction plus riche, `frontend/<app>/custom.py`.
+- Pas de traduction assistée/automatique pour le contenu multilingue
+  (`traductions`, champ `multilingue`) — chaque texte, dans chacune des
+  langues actives du projet, est saisi à la main dans le fichier `.nova`.
+- La pluralisation anglaise (`inflect`) ne couvre que l'anglais : un nom
+  d'entité écrit dans une autre langue du DSL n'est pas pluralisé selon
+  les règles de cette langue.
 - Pas encore de NOVA Studio (IDE dédié), Marketplace, NOVA Cloud, NOVA AI
   — ce dépôt couvre le compilateur (Phase 1/2 de la feuille de route).
 
@@ -721,6 +834,7 @@ for a file mixing French and English.
 | Sort by | `sort_by` / `order_by` | `trier_par` |
 | Limit | `limit` | `limite` |
 | Types | `string`, `text`, `int`, `float`, `bool`, `date`, `datetime`, `file`, `image`, `color` | `chaine`/`chaîne`, `texte`, `entier`, `decimal`/`décimal`, `booleen`/`booléen`, `date`, `date_heure`, `fichier`, `image`, `couleur` |
+| Database | `database` | `base_donnees` / `base_données` |
 
 This table only covers EN/FR for readability; Spanish, German, Italian
 and Portuguese are accepted for the same keywords (including the
@@ -739,6 +853,53 @@ field email: string required pattern = "^[^@]+@[^@]+$"
 Automatically generates a Pydantic `pattern=r"..."` constraint on the
 SQLModel table and on the `Create`/`Update` schemas — the API rejects an
 invalid value with a `422`, no hand-written validation code needed.
+
+### Database: configurable SQL engine and NoSQL MongoDB backend
+
+By default the generated project uses **SQLite** (a local file, no
+external dependency). The `application` block accepts a `database`
+property (`base_donnees`/`base_données` in French) to pick another
+engine:
+
+```
+app MyApp {
+    database: postgresql
+}
+```
+
+Recognized values (with common aliases, case-insensitive): `sqlite`
+(default), `postgresql`/`postgres`/`postgre`, `mysql`/`mariadb`/`maria`,
+`sqlserver`/`sql_server`/`mssql`, `oracle`, and `mongodb`/`mongo`. An
+unknown value is rejected at compile time with the list of valid values.
+
+**SQL engines (`postgresql`, `mysql`, `sqlserver`, `oracle`)** — the
+generated backend stays a regular SQLModel project: the default
+connection URL, the required driver dependency (`psycopg2-binary`,
+`pymysql`, `pyodbc`, `oracledb`) and the `docker-compose.yml` `db:`
+service (official image, dev credentials, persistent volume) are all
+adjusted automatically for the chosen engine; the Helm chart's
+`values.yaml` gets the matching default URL. `sqlite` keeps the
+historical behavior unchanged (no `db:` service, `backend_data` volume
+shared with uploads).
+
+**NoSQL backend (`mongodb`/`mongo`)** — an entirely separate generation
+path: [Beanie](https://beanie-odm.dev/) `Document` models (async, over
+Motor/`AsyncIOMotorClient`) instead of SQLModel tables, `async`/`await`
+CRUD routes, string ids (a serialized Mongo ObjectId) instead of
+auto-incrementing integers, `unique` constraints translated into a
+unique Mongo index (`pymongo.errors.DuplicateKeyError` caught and turned
+into a `422`, matching the SQL backend). JWT auth, email notifications,
+file uploads, multilingual content, `belongs_to` and entity charts are
+**all supported** and reuse the existing backend-agnostic code. However,
+in this MVP, `database: mongodb` is **incompatible** with:
+
+- the `query`/`requete` block (declarative filters),
+- the `calendar`/`calendrier` block,
+- materialized `has_many`/`possede_plusieurs` relations.
+
+These combinations are detected and rejected **at compile time** (a
+clear error listing the offending block(s)) instead of silently
+generating an incomplete Mongo project — beyond that, `routers_custom/`.
 
 ### Style and CSS
 
@@ -807,9 +968,11 @@ api Product {
 
 In production, set the `NOVA_JWT_SECRET` environment variable (the
 generated `docker-compose.yml` already references it) — never use the
-default value as-is. The `role` field on `/auth/register` is currently
-unrestricted (anyone can register as `admin`) — lock this down in
-`routers_custom/` before any public deployment.
+default value as-is. `/auth/register` carries no `role` field: only the
+very first account created on the project automatically becomes `admin`
+(bootstrap, no default credentials to change), every later one gets the
+default role; an admin can then promote another account via `PATCH
+/auth/users/{id}/role`. Create your own account right after deployment.
 
 ### Declarative queries (`query` / `requete`)
 
@@ -828,8 +991,23 @@ query ExpensiveProducts on Product {
 Generates `GET /requetes/expensive-products`, a readable SQLAlchemy
 query (`select(...).where(...).order_by(...).limit(...)`) — no SQL
 string to write. Available comparators: `>`, `<`, `>=`, `<=`, `==`,
-`!=`. For combined filters, joins, or richer logic, `routers_custom/`
-remains the intended extension point.
+`!=`. Several root-level `filter:`/`filtre:` combine with AND; an
+`or: { filter: ... filter: ... }` block groups filters combined with OR
+(the whole group still AND'd with the rest, several `or:` blocks
+allowed):
+
+```
+query ProductsToCheck on Product {
+  filter: stock > 0
+  or: {
+    filter: price < 20
+    filter: promo == true
+  }
+}
+```
+
+Still limited to a single entity per query (no joins); for joins or
+richer logic, `routers_custom/` remains the intended extension point.
 
 ### Charts (`chart`)
 
@@ -861,12 +1039,15 @@ chart TopExpensive on ExpensiveProducts {
 }
 ```
 
-Available types (`type:`): `bar`/`barres`/`barra`/`balken`,
-`line`/`ligne`/`linea`/`linie`, `pie`/`camembert`/`torta`/`kreis`,
-`area`/`aire`/`área`/`fläche` — each with synonyms in all 6 languages.
-An unknown `on`/`sur` reference (neither an entity nor a query) is
-caught at compile time (`nova check`/`nova compile`), not on the
-page's first load.
+Available types (`type:`): `bar`/`barres`, `line`/`ligne`,
+`pie`/`camembert`, `area`/`aire`, `radar`, `scatter`/`nuage_de_points`
+— each with synonyms in all 6 languages. `y_axis` accepts several
+comma-separated fields for a multi-series chart (`y_axis: sales, costs,
+margin`), on the types that support it (`bar`/`line`/`area` — rejected
+at compile time on `pie`/`radar`/`scatter`, which have no natural
+multi-series rendering). An unknown `on`/`sur` reference (neither an
+entity nor a query) is caught at compile time (`nova check`/`nova
+compile`), not on the page's first load.
 
 ### Rich UI components: upload, images, colors, native pickers
 
@@ -890,7 +1071,12 @@ entity Product {
   anywhere in the project), stored under a unique name in the same
   `backend_data` volume already used by SQLite, and served back
   statically under `/files/<name>`. The field just stores that URL
-  (`str`) — no binary column in the database.
+  (`str`) — no binary column in the database. Max size 10 MiB by
+  default (`NOVA_UPLOAD_MAX_BYTES`), a restricted default extension
+  allowlist (`NOVA_UPLOAD_ALLOWED_EXTENSIONS`, rejected with a 415
+  outside it), and an image wider than 2000px is automatically resized
+  (Pillow, `NOVA_UPLOAD_MAX_IMAGE_DIMENSION`) — all three overridable
+  without recompiling.
 - **`color`**: a native color picker (`type="color"`).
 - The existing **`date`**, **`datetime`** and **`int`**/`float` types
   also get a matching native widget (`type="date"`,
@@ -954,18 +1140,36 @@ know about:
   block to be declared somewhere in the file — otherwise `nova check`/
   `nova compile` refuses to compile rather than producing a project
   whose notification would fail silently.
-- The message sent is a simple, automatically generated bilingual text
-  (subject + body mentioning the entity and its id) — no HTML template
-  or attachment in this MVP; for custom content, call
-  `send_email(subject=..., body=..., to=...)` from `routers_custom/`.
+- The email sent is HTML (with a plain-text fallback,
+  `multipart/alternative`); `recipient: <field>` (alias `destinataire:`)
+  on `api`, alongside `notifier:`, sends to the address held in that
+  field of the record concerned instead of the `email` block's fixed
+  recipient; `attachment: <field>` (alias `piece_jointe:`) attaches the
+  file referenced by a `file`/`image` field of the record:
+
+  ```
+  api Order {
+    create
+    notifier: create
+    recipient: customer_email
+    attachment: invoice
+  }
+  ```
+
+  The message content itself (subject + bilingual HTML body mentioning
+  the entity and its id) is still automatically generated — no DSL to
+  customize the text itself in this MVP; for fully custom content, call
+  `send_email(subject=..., body=..., to=..., attachment_path=...)` from
+  `routers_custom/`.
 
 ### Calendar (`calendar`)
 
 A `calendar <Name> on <Entity> { ... }` block automatically generates
 its own Reflex page (route `/calendriers/<name>`, link added to the
-navigation bar) showing a **monthly view** of the entity's records —
-the grid is computed server-side using only the Python standard
-library (`calendar`, `datetime`), **no extra JS dependency**:
+navigation bar) showing the entity's records in a **month, week, or day
+view** (a toggle button, all recomputed server-side) — the grid is
+computed using only the Python standard library (`calendar`,
+`datetime`), **no extra JS dependency**:
 
 ```
 calendar Additions on Product {
@@ -981,24 +1185,36 @@ calendar Additions on Product {
 - `title_field`: field shown in the cell for the day it falls on
   (multiple titles for the same day are joined with commas) — if
   omitted, a simple "•" marker flags a day that has records.
-- `<`/`>` buttons to navigate between months (everything is
-  recomputed server-side, no page reload); JWT protection is
-  automatically inherited if `api <Entity> { ... protect: <role> }`
-  is present, same as `chart`.
+- `<`/`>` buttons to navigate (month, week, or day depending on the
+  active view, no page reload); JWT protection is automatically
+  inherited if `api <Entity> { ... protect: <role> }` is present, same
+  as `chart`.
+- iCalendar export: every calendar also exposes a `GET
+  /ics/<name>.ics` route (RFC 5545, no extra dependency) — subscribe to
+  it directly from Google Calendar/Outlook/etc.
 - An unknown `on` reference, a `date_field` that isn't a
   `date`/`datetime` field of the entity, or a nonexistent
   `title_field` are all caught at compile time (`nova check`/`nova
   compile`), never on first page load.
-- Read-only view in this MVP (no creating/moving an event directly
-  from the calendar grid) — use the entity's `form` page to add a
+- Read-only view in this MVP (no drag-and-drop event creation/moving
+  directly on the grid) — use the entity's `form` page to add a
   record.
 
 ### Multilingual content (`translations` + `multilingual` field)
 
-Two complementary mechanisms, both **always covering all 6 DSL
-languages** (no project-configurable subset in this MVP), with a
-**language switcher** automatically added to the navigation bar (current
-language persisted in a browser cookie, same as the JWT token):
+Two complementary mechanisms, with a **language switcher** automatically
+added to the navigation bar (current language persisted in a browser
+cookie, same as the JWT token). By default all 6 DSL languages are
+active; `app { languages: fr, en }` (alias `langues`/`idiomas`/
+`sprachen`/`lingue`) restricts the generated project to a subset
+(`multilingual` field columns, `translations` entries, and the frontend
+language switcher then only carry those languages):
+
+```
+app MyShop {
+  languages: fr, en
+}
+```
 
 **Interface text** (titles, labels...): a centralized `translations { ...
 }` block, referenced by key from any `show`'s `title`:
@@ -1020,9 +1236,10 @@ page Products {
 }
 ```
 
-All 6 languages (`fr`/`en`/`es`/`de`/`it`/`pt`) are **required** for
-every entry — a missing language is caught at compile time, not on the
-page's first render. `title "Literal text"` (quoted) is still available
+Every entry must provide **all of the project's active languages** (all
+6 by default, or the subset from `app { languages: ... }`) — a missing
+language is caught at compile time, not on the page's first render.
+`title "Literal text"` (quoted) is still available
 alongside it and displays the same text regardless of the selected
 language, as before this feature.
 
@@ -1088,61 +1305,65 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-89 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
+162 tests: FR/EN structural equivalence, ES/DE/IT/PT synonyms,
 generated-code syntactic validity, foreign keys, explicit Reflex form
-setters, regex validation, CSS styling, charts (`chart`, 4 types,
-entity/query source), rich `file`/`image`/`color` fields (upload,
+setters, regex validation, CSS styling, charts (`chart`, 6 types
+including multi-series, entity/query source), rich `file`/`image`/`color` fields (upload,
 native pickers, enriched table/card rendering), email notifications
 (`email` + `notifier:`), calendar (`calendar`, default date-field
 resolution, multilingual aliases, error cases), multilingual content
 (`translations`, `multilingual` field, 6-language aliases, error
-cases), custom extension points — including several tests that
-**actually import** the generated backend and frontend (not just a
-syntax check): a full JWT flow (register, login, roles, protected
-routes) and the declarative-query route via `TestClient`, a real file
-upload served back by the static mount, an email notification actually
-sent on create/delete (SMTP connection itself mocked, everything else
-real code) and a send failure that never breaks the request, and
-actually building the Reflex component tree of every page (chart,
-calendar with its server-computed day grid, form with an upload zone,
-card, language switcher, and the reactive `t_<key>()` translation
-function).
+cases), Helm chart generation (ConfigMap/Secret/PVC, conditional
+templating based on auth/uploads/email), configurable SQL database
+engine (Postgres/MySQL/SQL Server/Oracle: driver, docker-compose
+service, Helm `values.yaml`), the NoSQL MongoDB backend (Beanie models,
+compile-time rejection of unsupported features), custom extension
+points — including several tests that **actually import** the generated
+backend and frontend (not just a syntax check): a full JWT flow
+(register, login, roles, protected routes) and the declarative-query
+route via `TestClient`, a real file upload served back by the static
+mount, an email notification actually sent on create/delete (SMTP
+connection itself mocked, everything else real code) and a send failure
+that never breaks the request, actually building the Reflex component
+tree of every page (chart, calendar with its server-computed day grid,
+form with an upload zone, card, language switcher, and the reactive
+`t_<key>()` translation function), and a full CRUD + JWT auth +
+uniqueness flow against the generated Mongo backend via `TestClient`
+with a mocked MongoDB server (`mongomock-motor`).
 
 ### Known MVP limitations
 
-- Naive English pluralization for table/route names.
-- A single main entity per `page` block (no multi-entity composition
-  yet).
-- `has_many` is informational only (no column generated); only
-  `belongs_to` produces a foreign key.
-- `pattern`/`motif` validation covers a single field at a time; any rule
-  spanning multiple fields belongs in `routers_custom/`.
-- The `query`/`requete` block only covers a single comparator-based
-  filter on one entity (no combined `AND`/`OR`, no joins); beyond that,
-  `routers_custom/`.
-- The `chart` block is deliberately limited to 4 types (bar/line/pie/
-  area) and one series per chart; for a richer dashboard,
+- `has_many` still generates no column (the foreign key lives on the
+  `belongs_to` side); `list`/`get` now expose a text summary of the
+  linked records (`<entity>_text`, comma-joined values) rather than a
+  bare mention — but not yet an interactive sub-list of full objects;
+  for that, `frontend/<app>/custom.py`.
+- `pattern`/`motif` validation still covers a single field at a time; a
+  rule comparing two fields is available via a `validation <Name> on
+  <Entity> { rule: fieldA > fieldB message: "..." }` block (one or more
+  rules) — beyond a direct two-field comparison (computed values, more
+  than two fields), `routers_custom/`.
+- The `query`/`requete` block is still limited to a single entity (no
+  joins); beyond that, `routers_custom/`.
+- The Helm chart generates a ConfigMap/Secret/PVC and a full
+  `values.yaml`, but remains a starting point to adapt (image registry,
+  real ingress, fine-grained autoscaling).
+- `database: mongodb` (NoSQL backend) is incompatible in this MVP with
+  `query`/`requete`, `calendar`/`calendrier` and materialized `has_many`
+  relations — explicitly rejected at compile time (see the Database
+  section above) rather than generating an incomplete project.
+- The HTML content (subject + body) of the `notifier:` email is still
+  automatically generated — no DSL to customize the text itself in this
+  MVP; for fully custom content, `routers_custom/`.
+- The `calendar` block stays read-only (no drag-and-drop event
+  creation/moving directly on the grid); for richer interaction,
   `frontend/<app>/custom.py`.
-- `/auth/register` leaves the role unrestricted by default — lock this
-  down before a public deployment (see the Authentication section
-  above).
-- The Helm chart is a skeleton meant to be adapted (image registry, real
-  ingress).
-- Uploaded files/images are stored on disk on the backend side
-  (`backend_data` volume) with no size/type limit or image resizing
-  applied by default — add this via `routers_custom/` before a public
-  deployment if needed.
-- The `email`/`notifier:` block sends a simple, automatically generated
-  bilingual text (subject + record id) — no HTML template, attachment,
-  or per-record dynamic recipient in this MVP; for custom content,
-  `routers_custom/`.
-- The `calendar` block is a read-only monthly view (no drag-and-drop
-  event creation/moving directly on the grid, no week/day view); for
-  richer interaction, `frontend/<app>/custom.py`.
-- Multilingual content (`translations`, `multilingual` field) always
-  covers all 6 DSL languages (no project-configurable subset); no
-  machine/assisted translation — every text is hand-entered in the
-  `.nova` file.
+- No machine/assisted translation for multilingual content
+  (`translations`, `multilingual` field) — every text, in each of the
+  project's active languages, is still hand-entered in the `.nova` file.
+- English pluralization (`inflect`) only covers English: an entity name
+  written in another DSL language isn't pluralized by that language's
+  rules.
 - Not yet included: NOVA Studio (dedicated IDE), Marketplace, NOVA
   Cloud, NOVA AI — this repo covers the compiler (roadmap Phase 1/2).
 

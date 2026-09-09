@@ -35,7 +35,7 @@ from __future__ import annotations
 import textwrap
 
 from ..ast_nodes import Calendar, Chart, NovaProgram, Page
-from ..keywords import LANG_CODES, STYLE_ALIASES, STYLE_CLASS_KEYS
+from ..keywords import STYLE_ALIASES, STYLE_CLASS_KEYS
 from .utils import to_ascii_identifier, to_pascal_case, to_snake_case, pluralize
 
 _HEADER = (
@@ -54,8 +54,24 @@ def _app_pkg_name(program: NovaProgram) -> str:
     return "nova_app"
 
 
-def _state_class_name(page: Page) -> str:
-    return f"{to_pascal_case(page.name)}State"
+def _state_class_name(page: Page, show=None, index: int | None = None) -> str:
+    # Une page avec un seul `show` garde le nom historique
+    # `<NomPage>State` (compatibilité totale avec les projets/tests
+    # existants). Une page multi-entités (plusieurs `show`, voir
+    # _generate_state_and_view) qualifie chaque state par l'entité affichée
+    # (`<NomPage><Entite>State`) pour que les N states d'une même page ne se
+    # percutent jamais — SAUF si la même entité apparaît plusieurs fois sur
+    # la même page (ex. `show Produit as table` PUIS `show Produit as
+    # carte` sur une seule page) : dans ce cas `<NomPage><Entite>State`
+    # collisionnerait entre les deux `show`, d'où `index` (1-based),
+    # ajouté par `_generate_state_and_view` uniquement quand nécessaire
+    # (`<NomPage><Entite><N>State`).
+    if show is None:
+        return f"{to_pascal_case(page.name)}State"
+    base = f"{to_pascal_case(page.name)}{to_pascal_case(show.entity)}"
+    if index is not None:
+        base += str(index)
+    return f"{base}State"
 
 
 def _page_route(page: Page) -> str:
@@ -65,16 +81,21 @@ def _page_route(page: Page) -> str:
 
 def _table_route_for_entity(program: NovaProgram, entity_name: str) -> str | None:
     """Première page en mode table affichant cette entité (cible de redirection
-    après création, et lien "+ Nouveau" depuis le tableau)."""
+    après création, et lien "+ Nouveau" depuis le tableau) — cherche parmi
+    TOUS les `show` de la page (pas seulement le premier) : une page
+    multi-entités (plusieurs `show`, voir _generate_state_and_view) peut
+    très bien afficher la table concernée en second ou troisième `show`."""
     for p in program.pages:
-        if p.shows and p.shows[0].entity == entity_name and p.shows[0].mode == "table":
+        if any(s.entity == entity_name and s.mode == "table" for s in p.shows):
             return _page_route(p)
     return None
 
 
 def _form_page_for_entity(program: NovaProgram, entity_name: str) -> Page | None:
+    """Même logique que `_table_route_for_entity` ci-dessus, pour un `show
+    ... comme formulaire` (cible du lien "+ Nouveau")."""
     for p in program.pages:
-        if p.shows and p.shows[0].entity == entity_name and p.shows[0].mode == "form":
+        if any(s.entity == entity_name and s.mode == "form" for s in p.shows):
             return p
     return None
 
@@ -83,9 +104,38 @@ def _api_for_entity(program: NovaProgram, entity_name: str):
     return next((a for a in program.apis if a.entity == entity_name), None)
 
 
+def _has_many_text_fields(entity, program: NovaProgram) -> list[tuple[str, str]]:
+    """Pour chaque relation `has_many` de `entity` (voir
+    `parser._validate_relations`, qui garantit que la cible existe et porte
+    un `belongs_to` réciproque), retourne (etiquette_affichee,
+    cle_json_du_resume). La clé correspond exactement au champ résumé texte
+    déjà calculé côté backend pour matérialiser la relation
+    (`api_fastapi._has_many_relation_info` : `<table_enfant>_text`) — le
+    frontend n'a donc besoin que de connaître cette clé, jamais la liste
+    imbriquée elle-même (même choix que pour le calendrier, `events_text` :
+    Reflex peine à typer un `rx.foreach` sur une valeur imbriquée dans un
+    dict lui-même dans une liste d'un state var)."""
+    out: list[tuple[str, str]] = []
+    for rel in entity.relations:
+        if rel.kind != "has_many":
+            continue
+        child = program.get_entity(rel.target)
+        if child is None:
+            continue
+        child_table = to_snake_case(pluralize(to_ascii_identifier(child.name)))
+        out.append((pluralize(rel.target), f"{child_table}_text"))
+    return out
+
+
 # --------------------------------------------------------------- chart ---
 
 _CHART_COLOR = "#7c66dc"  # violet, cohérent avec le thème accent_color="violet"
+# Palette utilisée pour les graphiques multi-séries (bar/line/area avec
+# plusieurs champs sur `axe_y`, voir keywords.CHART_MULTI_SERIES_TYPES) :
+# `_CHART_COLOR` reste toujours la première couleur, ce qui rend le rendu
+# à une seule série (cas le plus courant) identique bit-à-bit à avant
+# l'ajout du multi-séries. Cycle si plus de séries que de couleurs.
+_CHART_PALETTE = [_CHART_COLOR, "#f5a623", "#50c878", "#e35d6a", "#4a90d9", "#f0c419"]
 
 
 def _chart_state_class_name(chart: Chart) -> str:
@@ -162,6 +212,7 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
     title = chart.title or chart.name
     x_key = chart.x_field or "x"
     y_key = chart.y_field or "y"
+    y_keys = chart.y_fields or ([y_key] if y_key else [])
 
     if chart.type == "pie":
         # La donnée du camembert se pose sur le sous-composant `pie`, pas sur
@@ -177,25 +228,70 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
             "    height=360,\n"
             ")"
         )
-    else:
-        chart_fn = {"bar": "bar_chart", "line": "line_chart", "area": "area_chart"}[chart.type]
-        series_fn = {"bar": "bar", "line": "line", "area": "area"}[chart.type]
-        if chart.type == "line":
-            series_kwargs = f'data_key="{y_key}", stroke="{_CHART_COLOR}"'
-        elif chart.type == "area":
-            series_kwargs = f'data_key="{y_key}", fill="{_CHART_COLOR}", stroke="{_CHART_COLOR}"'
-        else:  # bar
-            series_kwargs = f'data_key="{y_key}", fill="{_CHART_COLOR}"'
+    elif chart.type == "radar":
+        # Comme `pie`, vérifié par construction réelle du composant avant
+        # d'écrire ce générateur : `data=` se pose sur `radar_chart` (comme
+        # bar/line/area), les axes polaires remplacent x_axis/y_axis. Un
+        # seul champ toujours ici : multi-séries restreint à bar/line/area,
+        # voir _validate_charts/kw.CHART_MULTI_SERIES_TYPES.
         chart_component = (
-            f"rx.recharts.{chart_fn}(\n"
-            f"    rx.recharts.{series_fn}({series_kwargs}),\n"
-            f'    rx.recharts.x_axis(data_key="{x_key}"),\n'
-            "    rx.recharts.y_axis(),\n"
+            "rx.recharts.radar_chart(\n"
+            f'    rx.recharts.radar(data_key="{y_key}", stroke="{_CHART_COLOR}", '
+            f'fill="{_CHART_COLOR}", fill_opacity=0.6),\n'
+            "    rx.recharts.polar_grid(),\n"
+            f'    rx.recharts.polar_angle_axis(data_key="{x_key}"),\n'
+            "    rx.recharts.polar_radius_axis(),\n"
             "    rx.recharts.graphing_tooltip(),\n"
             f"    data={state_cls}.rows,\n"
             '    width="100%",\n'
             "    height=360,\n"
             ")"
+        )
+    elif chart.type == "scatter":
+        # Vérifié par construction réelle : contrairement à bar/line/area/
+        # radar, `data=` se pose ici sur le sous-composant `scatter`, pas sur
+        # `scatter_chart` — et `y_axis` porte `data_key` (axe numérique),
+        # comme `x_axis`.
+        chart_component = (
+            "rx.recharts.scatter_chart(\n"
+            f'    rx.recharts.scatter(data={state_cls}.rows, fill="{_CHART_COLOR}"),\n'
+            f'    rx.recharts.x_axis(data_key="{x_key}"),\n'
+            f'    rx.recharts.y_axis(data_key="{y_key}"),\n'
+            "    rx.recharts.graphing_tooltip(),\n"
+            '    width="100%",\n'
+            "    height=360,\n"
+            ")"
+        )
+    else:
+        # bar/line/area : seuls types multi-séries (kw.CHART_MULTI_SERIES_TYPES,
+        # garanti par _validate_charts). Une série par champ de `axe_y`, une
+        # couleur de _CHART_PALETTE par série (cycle si plus de séries que de
+        # couleurs) ; à une seule série, produit exactement le même code
+        # qu'avant l'ajout du multi-séries (_CHART_PALETTE[0] == _CHART_COLOR).
+        chart_fn = {"bar": "bar_chart", "line": "line_chart", "area": "area_chart"}[chart.type]
+        series_fn = {"bar": "bar", "line": "line", "area": "area"}[chart.type]
+        series_lines = []
+        for i, field_name in enumerate(y_keys):
+            color = _CHART_PALETTE[i % len(_CHART_PALETTE)]
+            if chart.type == "line":
+                series_kwargs = f'data_key="{field_name}", stroke="{color}"'
+            elif chart.type == "area":
+                series_kwargs = f'data_key="{field_name}", fill="{color}", stroke="{color}"'
+            else:  # bar
+                series_kwargs = f'data_key="{field_name}", fill="{color}"'
+            series_lines.append(f"    rx.recharts.{series_fn}({series_kwargs}),\n")
+        legend_line = "    rx.recharts.legend(),\n" if len(y_keys) > 1 else ""
+        chart_component = (
+            f"rx.recharts.{chart_fn}(\n"
+            + "".join(series_lines)
+            + f'    rx.recharts.x_axis(data_key="{x_key}"),\n'
+            + "    rx.recharts.y_axis(),\n"
+            + "    rx.recharts.graphing_tooltip(),\n"
+            + legend_line
+            + f"    data={state_cls}.rows,\n"
+            + '    width="100%",\n'
+            + "    height=360,\n"
+            + ")"
         )
 
     inner = (
@@ -231,6 +327,15 @@ def _calendar_route(cal: Calendar) -> str:
     return f"/calendriers/{slug}" if slug else "/calendriers"
 
 
+def _calendar_ics_slug(cal: Calendar) -> str:
+    """Slug utilisé pour la route d'export iCal générée côté backend (voir
+    codegen/api_fastapi.py::_generate_calendar_ics_router) — même slug que
+    `_calendar_route` (juste sans le préfixe `/calendriers/`), pour que le
+    lien affiché sur la page calendrier et la route backend restent
+    cohérents sans dupliquer la logique de calcul du slug."""
+    return to_snake_case(to_ascii_identifier(cal.name)).replace("_", "-")
+
+
 def _calendar_data_source(program: NovaProgram, cal: Calendar, has_auth: bool) -> tuple[str, bool]:
     """Résout `calendar ... sur <Entite>` en (chemin_url_backend, protege) —
     toujours une Entity ici (`parser._validate_calendars` le garantit déjà),
@@ -245,17 +350,24 @@ def _calendar_data_source(program: NovaProgram, cal: Calendar, has_auth: bool) -
 def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_auth: bool) -> tuple[str, str]:
     """Retourne (code_du_state, code_de_la_fonction_de_page) pour un bloc
     `calendar` : un état Reflex qui charge TOUTES les lignes de l'entité
-    (comme une page table) puis les regroupe côté serveur, jour par jour du
-    mois affiché, via `_build_days` (stdlib `calendar.Calendar.
-    monthdatescalendar` + `datetime.date` — aucune dépendance JS
+    (comme une page table) puis les regroupe côté serveur — au choix, jour
+    par jour du mois affiché (`_build_days`, vue historique), de la semaine
+    affichée (`_build_week_days`) ou de la seule journée sélectionnée
+    (`_build_day_events`) — via la seule stdlib (`calendar.Calendar.
+    monthdatescalendar` + `datetime.date`/`timedelta` — aucune dépendance JS
     supplémentaire, conformément au choix de conception retenu pour cette
-    fonctionnalité). Chaque jour est un dict PLAT (`date`, `day`,
-    `in_month`, `events_text`) plutôt qu'un dict contenant une liste
-    imbriquée d'événements : `rx.foreach` niché sur une valeur `list[str]`
-    à l'intérieur d'un state var `list[dict]` lève `ForeachVarError` (bug
-    réel rencontré et corrigé pendant la conception de ce bloc `calendar`,
-    voir exploration précédente) — d'où `events_text`, les titres des
-    événements du jour déjà joints en une seule chaîne."""
+    fonctionnalité, ET explicitement SANS glisser-déposer d'événement,
+    conformément à la décision explicite prise pour cette extension : vue
+    semaine/jour + export iCal, mais pas de drag & drop). `self.view`
+    ("month"/"week"/"day") sélectionne la vue active ; `rx.match` choisit le
+    composant à afficher — voir `inner` plus bas. Chaque jour est un dict
+    PLAT (`date`, `day`, `in_month`, `events_text`) plutôt qu'un dict
+    contenant une liste imbriquée d'événements : `rx.foreach` niché sur une
+    valeur `list[str]` à l'intérieur d'un state var `list[dict]` lève
+    `ForeachVarError` (bug réel rencontré et corrigé pendant la conception
+    de ce bloc `calendar`) — d'où `events_text`, les titres des événements
+    du jour déjà joints en une seule chaîne (même principe pour
+    `week_days`/`day_events`)."""
     state_cls = _calendar_state_class_name(cal)
     url_path, is_protected = _calendar_data_source(program, cal, has_auth)
     date_field_snake = to_snake_case(cal.date_field)
@@ -272,6 +384,7 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
     # Sans `champ_titre`/`title_field`, on affiche un simple marqueur "•"
     # pour signaler qu'un jour a des enregistrements, plutôt que rien.
     title_expr = f'str(row.get("{title_field_snake}", ""))' if title_field_snake else '"•"'
+    weekday_labels_literal = "[" + ", ".join(repr(label) for label in _WEEKDAY_LABELS) + "]"
 
     state_lines = [
         f"class {state_cls}(rx.State):",
@@ -279,8 +392,13 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         + (' Route protégée : le jeton AuthState est envoyé en en-tête Authorization."""' if is_protected else '"""'),
         "    rows: list[dict] = []",
         "    days: list[dict] = []",
+        "    week_days: list[dict] = []",
+        "    day_events: list[dict] = []",
         "    year: int = date.today().year",
         "    month: int = date.today().month",
+        '    week_start: str = ""',
+        '    selected_day: str = ""',
+        '    view: str = "month"    # "month" | "week" | "day"',
         '    label: str = ""',
         "    is_loading: bool = False",
         "",
@@ -294,7 +412,16 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         "            if resp.status_code == 200:",
         "                self.rows = resp.json()",
         "        self.is_loading = False",
+        "        if not self.week_start:",
+        "            self.week_start = (date.today() - timedelta(days=date.today().weekday())).isoformat()",
+        "        if not self.selected_day:",
+        "            self.selected_day = date.today().isoformat()",
         "        self._build_days()",
+        "        self._build_week_days()",
+        "        self._build_day_events()",
+        "",
+        "    def set_view(self, view: str):",
+        "        self.view = view",
         "",
         "    def _build_days(self):",
         '        self.label = f"{self.year}-{self.month:02d}"',
@@ -316,19 +443,67 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         "                })",
         "        self.days = days",
         "",
-        "    def prev_month(self):",
-        "        self.month -= 1",
-        "        if self.month < 1:",
-        "            self.month = 12",
-        "            self.year -= 1",
-        "        self._build_days()",
+        "    def _build_week_days(self):",
+        "        # Semaine de 7 jours à partir de `week_start` (toujours un lundi,",
+        "        # voir load_rows/prev/next) — pas de dépendance JS, même principe",
+        "        # que `_build_days` mais sans la notion de mois affiché.",
+        f"        weekday_labels = {weekday_labels_literal}",
+        "        start = date.fromisoformat(self.week_start)",
+        "        days = []",
+        "        for i in range(7):",
+        "            d = start + timedelta(days=i)",
+        "            iso = d.isoformat()",
+        '            events_text = ", ".join(',
+        f"                {title_expr}",
+        "                for row in self.rows",
+        f'                if str(row.get("{date_field_snake}", ""))[:10] == iso',
+        "            )",
+        "            days.append({",
+        '                "date": iso,',
+        '                "day": d.day,',
+        '                "weekday": weekday_labels[d.weekday()],',
+        '                "events_text": events_text,',
+        "            })",
+        "        self.week_days = days",
         "",
-        "    def next_month(self):",
-        "        self.month += 1",
-        "        if self.month > 12:",
-        "            self.month = 1",
-        "            self.year += 1",
-        "        self._build_days()",
+        "    def _build_day_events(self):",
+        "        # Liste (pas juste un texte joint, contrairement à `events_text`",
+        "        # ci-dessus) des événements de `selected_day` : la vue jour a la",
+        "        # place d'afficher chaque titre sur sa propre ligne.",
+        "        iso = self.selected_day",
+        "        events = []",
+        "        for row in self.rows:",
+        f'            if str(row.get("{date_field_snake}", ""))[:10] == iso:',
+        f"                events.append({{\"title\": {title_expr}}})",
+        "        self.day_events = events",
+        "",
+        "    def prev(self):",
+        '        if self.view == "month":',
+        "            self.month -= 1",
+        "            if self.month < 1:",
+        "                self.month = 12",
+        "                self.year -= 1",
+        "            self._build_days()",
+        '        elif self.view == "week":',
+        "            self.week_start = (date.fromisoformat(self.week_start) - timedelta(days=7)).isoformat()",
+        "            self._build_week_days()",
+        "        else:",
+        "            self.selected_day = (date.fromisoformat(self.selected_day) - timedelta(days=1)).isoformat()",
+        "            self._build_day_events()",
+        "",
+        "    def next(self):",
+        '        if self.view == "month":',
+        "            self.month += 1",
+        "            if self.month > 12:",
+        "                self.month = 1",
+        "                self.year += 1",
+        "            self._build_days()",
+        '        elif self.view == "week":',
+        "            self.week_start = (date.fromisoformat(self.week_start) + timedelta(days=7)).isoformat()",
+        "            self._build_week_days()",
+        "        else:",
+        "            self.selected_day = (date.fromisoformat(self.selected_day) + timedelta(days=1)).isoformat()",
+        "            self._build_day_events()",
         "",
     ]
     state_code = "\n".join(state_lines) + "\n"
@@ -336,7 +511,7 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
     weekday_header = ",\n        ".join(
         f'rx.text("{label}", size="2", weight="bold", align="center")' for label in _WEEKDAY_LABELS
     )
-    day_cell = (
+    month_day_cell = (
         "rx.box(\n"
         '            rx.text(day["day"], size="2", weight="bold"),\n'
         '            rx.cond(day["events_text"] != "", rx.text(day["events_text"], size="1", color_scheme="gray")),\n'
@@ -347,16 +522,19 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         '            width="100%",\n'
         "        )"
     )
-    inner = (
-        "rx.vstack(\n"
-        f'    rx.heading("{cal.name}", size="7"),\n'
-        "    rx.hstack(\n"
-        f'        rx.button("<", on_click={state_cls}.prev_month, size="2", variant="soft"),\n'
-        f'        rx.heading({state_cls}.label, size="4"),\n'
-        f'        rx.button(">", on_click={state_cls}.next_month, size="2", variant="soft"),\n'
-        '        spacing="3",\n'
-        '        align="center",\n'
-        "    ),\n"
+    week_day_cell = (
+        "rx.box(\n"
+        '            rx.text(day["weekday"], size="1", color_scheme="gray"),\n'
+        '            rx.text(day["day"], size="2", weight="bold"),\n'
+        '            rx.cond(day["events_text"] != "", rx.text(day["events_text"], size="1", color_scheme="gray")),\n'
+        '            padding="0.5em",\n'
+        '            border="1px solid var(--gray-5)",\n'
+        '            min_height="100px",\n'
+        '            width="100%",\n'
+        "        )"
+    )
+    month_grid = (
+        "rx.fragment(\n"
         "    rx.grid(\n"
         f"        {weekday_header},\n"
         '        columns="7",\n'
@@ -364,10 +542,69 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         '        width="100%",\n'
         "    ),\n"
         "    rx.grid(\n"
-        f"        rx.foreach({state_cls}.days, lambda day: {day_cell}),\n"
+        f"        rx.foreach({state_cls}.days, lambda day: {month_day_cell}),\n"
         '        columns="7",\n'
         '        spacing="1",\n'
         '        width="100%",\n'
+        "    ),\n"
+        ")"
+    )
+    week_grid = (
+        "rx.grid(\n"
+        f"    rx.foreach({state_cls}.week_days, lambda day: {week_day_cell}),\n"
+        '    columns="7",\n'
+        '    spacing="1",\n'
+        '    width="100%",\n'
+        ")"
+    )
+    day_list = (
+        "rx.vstack(\n"
+        "    rx.cond(\n"
+        f"        {state_cls}.day_events.length() == 0,\n"
+        '        rx.text("Aucun événement / No events", size="2", color_scheme="gray"),\n'
+        f'        rx.foreach({state_cls}.day_events, lambda ev: rx.text(ev["title"], size="3")),\n'
+        "    ),\n"
+        '    spacing="2",\n'
+        '    align="start",\n'
+        '    width="100%",\n'
+        ")"
+    )
+    label_display = (
+        "rx.match(\n"
+        f"    {state_cls}.view,\n"
+        f'    ("week", rx.heading({state_cls}.week_start, size="4")),\n'
+        f'    ("day", rx.heading({state_cls}.selected_day, size="4")),\n'
+        f'    rx.heading({state_cls}.label, size="4"),\n'
+        ")"
+    )
+    slug = _calendar_ics_slug(cal)
+    inner = (
+        "rx.vstack(\n"
+        f'    rx.heading("{cal.name}", size="7"),\n'
+        "    rx.hstack(\n"
+        f'        rx.button("Mois / Month", on_click=lambda: {state_cls}.set_view("month"), '
+        f'size="2", variant=rx.cond({state_cls}.view == "month", "solid", "soft")),\n'
+        f'        rx.button("Semaine / Week", on_click=lambda: {state_cls}.set_view("week"), '
+        f'size="2", variant=rx.cond({state_cls}.view == "week", "solid", "soft")),\n'
+        f'        rx.button("Jour / Day", on_click=lambda: {state_cls}.set_view("day"), '
+        f'size="2", variant=rx.cond({state_cls}.view == "day", "solid", "soft")),\n'
+        f'        rx.link("Exporter iCal / Export iCal", href=f"{{PUBLIC_BACKEND_URL}}/ics/{slug}.ics", is_external=True),\n'
+        '        spacing="3",\n'
+        '        align="center",\n'
+        '        wrap="wrap",\n'
+        "    ),\n"
+        "    rx.hstack(\n"
+        f'        rx.button("<", on_click={state_cls}.prev, size="2", variant="soft"),\n'
+        f"        {textwrap.indent(label_display, '        ').strip()},\n"
+        f'        rx.button(">", on_click={state_cls}.next, size="2", variant="soft"),\n'
+        '        spacing="3",\n'
+        '        align="center",\n'
+        "    ),\n"
+        "    rx.match(\n"
+        f"        {state_cls}.view,\n"
+        f'        ("week", {textwrap.indent(week_grid, "        ").strip()}),\n'
+        f'        ("day", {textwrap.indent(day_list, "        ").strip()}),\n'
+        f"        {textwrap.indent(month_grid, '        ').strip()},\n"
         "    ),\n"
         '    spacing="4",\n'
         '    width="100%",\n'
@@ -562,21 +799,28 @@ class LangState(rx.State):
     navigateur, valable entre deux rechargements de page, comme le jeton
     JWT de AuthState."""
 
-    lang: str = rx.Cookie("fr", name="nova_lang")
+    lang: str = rx.Cookie("{default_lang}", name="nova_lang")
 
     def set_lang(self, value: str) -> None:
         self.lang = value
 '''
 
 
-def _generate_lang_state() -> str:
-    return _LANG_STATE_TEMPLATE
+def _generate_lang_state(active_langs: list[str]) -> str:
+    # Langue par défaut du cookie : `application { lang: ... }` si déclarée
+    # (validée par parser._validate_app_languages — forcément dans
+    # `active_langs` si `langues:` est aussi utilisé), sinon la première
+    # langue active (généralement "fr", comportement historique inchangé
+    # quand `langues:` n'est pas utilisé, puisqu'active_langs == LANG_CODES
+    # commence par "fr" — voir `NovaProgram.active_languages`).
+    default_lang = active_langs[0]
+    return _LANG_STATE_TEMPLATE.format(default_lang=default_lang)
 
 
-def _lang_switcher_src() -> str:
+def _lang_switcher_src(active_langs: list[str]) -> str:
     return (
         "rx.select(\n"
-        f"            {LANG_CODES!r},\n"
+        f"            {active_langs!r},\n"
         "            value=LangState.lang,\n"
         "            on_change=LangState.set_lang,\n"
         '            size="2",\n'
@@ -592,11 +836,12 @@ def _generate_translation_helpers(program: NovaProgram) -> str:
     """Une fonction Python par clé du bloc `traductions`, retournant une
     expression `rx.match` réactive plutôt qu'un texte figé à la
     génération."""
+    active_langs = program.active_languages()
     lines = []
     for key, texts in program.translations.items():
         fn_name = _translation_fn_name(key)
-        cases = ", ".join(f"({lang!r}, {texts[lang]!r})" for lang in LANG_CODES)
-        default = repr(texts["fr"])
+        cases = ", ".join(f"({lang!r}, {texts[lang]!r})" for lang in active_langs)
+        default = repr(texts[active_langs[0]])
         lines.append(f"def {fn_name}():")
         lines.append(f"    return rx.match(LangState.lang, {cases}, {default})")
         lines.append("")
@@ -617,27 +862,28 @@ def _title_expr_src(show, fallback: str) -> str:
     return f'"{text}"'
 
 
-def _multilingual_display_expr(f, row_var: str = "row") -> str:
+def _multilingual_display_expr(f, active_langs: list[str], row_var: str = "row") -> str:
     """Expression Reflex affichant la valeur d'un champ `multilingue` dans
-    la langue actuellement sélectionnée — une colonne par langue en base
-    (voir codegen/api_fastapi.py), résolue avec `rx.match` (repli sur le
-    français si `LangState.lang` ne correspondait à aucune des 6 valeurs
-    attendues, ce qui ne devrait jamais arriver en pratique)."""
+    la langue actuellement sélectionnée — une colonne par langue ACTIVE en
+    base (voir codegen/api_fastapi.py), résolue avec `rx.match` (repli sur
+    la première langue active si `LangState.lang` ne correspondait à
+    aucune des valeurs attendues, ce qui ne devrait jamais arriver en
+    pratique)."""
     base = to_snake_case(f.name)
-    cases = ", ".join(f'("{lang}", {row_var}["{base}_{lang}"])' for lang in LANG_CODES)
-    return f'rx.match(LangState.lang, {cases}, {row_var}["{base}_fr"])'
+    cases = ", ".join(f'("{lang}", {row_var}["{base}_{lang}"])' for lang in active_langs)
+    return f'rx.match(LangState.lang, {cases}, {row_var}["{base}_{active_langs[0]}"])'
 
 
-def _multilingual_form_block_src(state_cls: str, f) -> str:
+def _multilingual_form_block_src(state_cls: str, f, active_langs: list[str]) -> str:
     """Bloc de formulaire pour un champ `multilingue` : un `rx.input` par
-    langue, labellisé `<champ> (fr)`/`<champ> (en)`/..., chacun lié à sa
-    propre variable de state `new_<champ>_<lang>` — même pattern de
+    langue ACTIVE, labellisé `<champ> (fr)`/`<champ> (en)`/..., chacun lié à
+    sa propre variable de state `new_<champ>_<lang>` — même pattern de
     setters explicites que les champs simples (voir
     `_generate_state_and_view`), pour la même raison (fiabilité variable
     des setters auto-générés selon la version de Reflex installée)."""
     base = to_snake_case(f.name)
     blocks = []
-    for lang in LANG_CODES:
+    for lang in active_langs:
         var_name = f"new_{base}_{lang}"
         blocks.append(
             "    rx.vstack(\n"
@@ -759,7 +1005,7 @@ def _generate_navbar(program: NovaProgram, has_auth: bool, has_i18n: bool = Fals
             '            rx.link(rx.button("Connexion / Log in", size="2"), href="/connexion"),\n'
             "        ),\n"
         )
-    lang_switcher = f"        {_lang_switcher_src()}" if has_i18n else ""
+    lang_switcher = f"        {_lang_switcher_src(program.active_languages())}" if has_i18n else ""
     return (
         "def nova_navbar() -> rx.Component:\n"
         '    """Barre de navigation partagée entre toutes les pages générées."""\n'
@@ -808,23 +1054,36 @@ def _wrap_page_body(inner_component_src: str, on_mount_expr: str, container_max_
     )
 
 
-def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -> tuple[str, str]:
-    """Retourne (code_du_state, code_de_la_fonction_de_page) pour un bloc page."""
-    if not page.shows:
-        state_cls = _state_class_name(page)
-        state_code = f"class {state_cls}(rx.State):\n    pass\n"
-        view_code = (
-            f"def {to_snake_case(page.name)}_page() -> rx.Component:\n"
-            + _wrap_page_body(f'rx.heading("{page.name}", size="7")', "None", "800px")
-        )
-        return state_code, view_code
-
-    show = page.shows[0]  # MVP : une entité principale par page
+def _generate_show_state_and_inner(
+    page: Page, show, program: NovaProgram, has_auth: bool, state_cls: str
+) -> tuple[str, str, str]:
+    """Retourne (code_du_state, composant_interne_src, largeur_conteneur)
+    pour UN `show` d'un bloc `page` — factorisé hors de
+    `_generate_state_and_view` pour que celle-ci puisse composer plusieurs
+    `show` sur la même page (pages multi-entités, voir plus bas) en
+    appelant cette fonction une fois par `show` avec un `state_cls` propre
+    à chacun. `composant_interne_src` est une expression Reflex SANS le
+    `return`/wrapper de page (barre de nav, conteneur...) — c'est
+    `_generate_state_and_view` qui assemble le/les composants renvoyés ici
+    dans la page finale (un seul `show` : directement ; plusieurs : empilés
+    dans un `rx.vstack`, voir plus bas)."""
     entity = program.get_entity(show.entity)
-    state_cls = _state_class_name(page)
     table_url_path = to_snake_case(pluralize(to_ascii_identifier(show.entity)))
     title_expr = _title_expr_src(show, page.name)
     fields = entity.fields if entity else []
+    # Relations `has_many` de cette entité (voir `_has_many_text_fields`) :
+    # matérialisées en table/carte comme une colonne/ligne supplémentaire
+    # par relation, lue directement depuis le résumé texte déjà calculé par
+    # le backend (`load_rows` reçoit `<table_enfant>_text` tel quel, aucune
+    # requête HTTP supplémentaire n'est nécessaire côté frontend). Non
+    # affichées en mode `formulaire` : ce mode ne sert qu'à CRÉER un nouvel
+    # enregistrement, qui n'a par définition encore aucun enfant lié.
+    has_many_fields = _has_many_text_fields(entity, program) if entity else []
+    # Langues actives du projet (`application { langues: ... }`, ou les 6
+    # langues du DSL par défaut — voir `NovaProgram.active_languages`) :
+    # utilisées pour chaque champ `multilingue` de cette entité (state vars/
+    # setters/payload ci-dessous, et l'affichage table/carte/formulaire).
+    active_langs = program.active_languages()
     api = _api_for_entity(program, show.entity)
     is_protected = bool(has_auth and api and api.protected_role)
 
@@ -838,7 +1097,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
     for f in fields:
         snake = to_snake_case(f.name)
         if f.multilingual:
-            for lang in LANG_CODES:
+            for lang in active_langs:
                 state_lines.append(f'    new_{snake}_{lang}: str = ""')
         else:
             state_lines.append(f'    new_{snake}: str = ""')
@@ -852,7 +1111,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         for f in fields:
             snake = to_snake_case(f.name)
             if f.multilingual:
-                for lang in LANG_CODES:
+                for lang in active_langs:
                     state_lines.append(f"    def set_new_{snake}_{lang}(self, value: str) -> None:")
                     state_lines.append(f"        self.new_{snake}_{lang} = value")
             else:
@@ -891,7 +1150,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         for f in fields:
             snake = to_snake_case(f.name)
             if f.multilingual:
-                payload_parts += [f'"{snake}_{lang}": self.new_{snake}_{lang}' for lang in LANG_CODES]
+                payload_parts += [f'"{snake}_{lang}": self.new_{snake}_{lang}' for lang in active_langs]
             else:
                 payload_parts.append(f'"{snake}": self.new_{snake}')
         payload_items = ", ".join(payload_parts)
@@ -905,7 +1164,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         for f in fields:
             snake = to_snake_case(f.name)
             if f.multilingual:
-                for lang in LANG_CODES:
+                for lang in active_langs:
                     state_lines.append(f'        self.new_{snake}_{lang} = ""')
             else:
                 state_lines.append(f'        self.new_{snake} = ""')
@@ -922,15 +1181,21 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
 
     # ---- vue -------------------------------------------------------------
     if show.mode == "table":
-        header_cells = ", ".join(f'rx.table.column_header_cell("{f.name}")' for f in fields)
+        header_cells = ", ".join(
+            [f'rx.table.column_header_cell("{f.name}")' for f in fields]
+            + [f'rx.table.column_header_cell("{label}")' for label, _key in has_many_fields]
+        )
 
         def _table_cell_src(f) -> str:
             if f.multilingual:
-                return f"rx.table.cell({_multilingual_display_expr(f)})"
+                return f"rx.table.cell({_multilingual_display_expr(f, active_langs)})"
             access = f"row['{to_snake_case(f.name)}']"
             return f"rx.table.cell({_field_value_src(f, access, access)})"
 
-        row_cells = ", ".join(_table_cell_src(f) for f in fields)
+        row_cells = ", ".join(
+            [_table_cell_src(f) for f in fields]
+            + [f"rx.table.cell(row['{key}'])" for _label, key in has_many_fields]
+        )
         create_page = _form_page_for_entity(program, show.entity)
         create_link = (
             f'rx.link(rx.button("+ {create_page.name}", size="2"), href="{_page_route(create_page)}"),'
@@ -969,7 +1234,7 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         for f in fields:
             snake = to_snake_case(f.name)
             if f.multilingual:
-                field_blocks.append(_multilingual_form_block_src(state_cls, f))
+                field_blocks.append(_multilingual_form_block_src(state_cls, f, active_langs))
                 continue
             if f.type in _UPLOAD_FIELD_TYPES:
                 field_blocks.append(_upload_form_block_src(state_cls, f))
@@ -1005,12 +1270,19 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
 
         def _card_value_src(f) -> str:
             if f.multilingual:
-                return f"rx.text({_multilingual_display_expr(f)})"
+                return f"rx.text({_multilingual_display_expr(f, active_langs)})"
             access = f"row['{to_snake_case(f.name)}']"
             default_src = f'rx.text(f"{f.name}: {{{access}}}")'
             return _field_value_src(f, access, default_src)
 
-        card_rows = ", ".join(_card_value_src(f) for f in fields)
+        def _has_many_value_src(label: str, key: str) -> str:
+            access = f"row['{key}']"
+            return f'rx.text(f"{label}: {{{access}}}")'
+
+        card_rows = ", ".join(
+            [_card_value_src(f) for f in fields]
+            + [_has_many_value_src(label, key) for label, key in has_many_fields]
+        )
         inner = (
             "rx.vstack(\n"
             f'    rx.heading({title_expr}, size="7"),\n'
@@ -1029,11 +1301,97 @@ def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -
         )
         container_width = "1100px"
 
+    return state_code, inner, container_width
+
+
+def _generate_state_and_view(page: Page, program: NovaProgram, has_auth: bool) -> tuple[str, str]:
+    """Retourne (code_du_state, code_de_la_fonction_de_page) pour un bloc
+    `page`. Une page sans `show` reste une simple page-titre (comportement
+    historique inchangé). Une page avec UN SEUL `show` délègue directement
+    à `_generate_show_state_and_inner` et enveloppe son résultat — sortie
+    strictement identique à avant l'ajout des pages multi-entités (même
+    nom de state `<NomPage>State`, voir `_state_class_name`).
+
+    Une page avec PLUSIEURS `show` (pages multi-entités) appelle
+    `_generate_show_state_and_inner` une fois par `show`, chacun avec son
+    propre state (`<NomPage><Entite>State`, pas de collision même si deux
+    `show` affichent la même entité dans des modes différents), empile les
+    composants renvoyés dans un seul `rx.vstack` (une section par `show`,
+    dans l'ordre déclaré), et charge toutes leurs données au montage via
+    une LISTE de gestionnaires `on_mount=[...]` (accepté par Reflex, vérifié
+    par construction réelle avant d'écrire ce générateur) plutôt qu'un seul
+    `on_mount=<state>.load_rows`."""
+    if not page.shows:
+        state_cls = _state_class_name(page)
+        state_code = f"class {state_cls}(rx.State):\n    pass\n"
+        view_code = (
+            f"def {to_snake_case(page.name)}_page() -> rx.Component:\n"
+            + _wrap_page_body(f'rx.heading("{page.name}", size="7")', "None", "800px")
+        )
+        return state_code, view_code
+
+    if len(page.shows) == 1:
+        show = page.shows[0]
+        state_cls = _state_class_name(page)
+        state_code, inner, container_width = _generate_show_state_and_inner(
+            page, show, program, has_auth, state_cls
+        )
+        view_code = (
+            f"def {to_snake_case(page.name)}_page() -> rx.Component:\n"
+            + _wrap_page_body(inner, f"{state_cls}.load_rows", container_width)
+        )
+        return state_code, view_code
+
+    # Pages multi-entités : un state + une section par `show`, empilés.
+    # Si la même entité apparaît plusieurs fois sur cette page (ex. `show
+    # Produit as table` PUIS `show Produit as carte`), `_state_class_name`
+    # produirait le même nom de classe pour les deux — on numérote alors
+    # chaque occurrence (1-based) pour éviter la collision silencieuse.
+    entity_counts: dict[str, int] = {}
+    for show in page.shows:
+        entity_counts[show.entity] = entity_counts.get(show.entity, 0) + 1
+    entity_seen: dict[str, int] = {}
+
+    state_codes = []
+    sections = []
+    load_exprs = []
+    max_container_width = 0
+    for show in page.shows:
+        if entity_counts[show.entity] > 1:
+            entity_seen[show.entity] = entity_seen.get(show.entity, 0) + 1
+            index = entity_seen[show.entity]
+        else:
+            index = None
+        state_cls = _state_class_name(page, show, index)
+        state_code, inner, container_width = _generate_show_state_and_inner(
+            page, show, program, has_auth, state_cls
+        )
+        state_codes.append(state_code)
+        sections.append(inner)
+        load_exprs.append(f"{state_cls}.load_rows")
+        max_container_width = max(max_container_width, int(container_width.rstrip("px")))
+
+    # `.strip()` ci-dessous retire l'indentation de la PREMIÈRE ligne de
+    # chaque section (comme ailleurs dans ce fichier, ex. chart_component
+    # dans un `rx.card`) ; `textwrap.indent` gère les lignes suivantes.
+    combined_sections_lines = []
+    for section in sections:
+        indented = textwrap.indent(section, "        ")
+        combined_sections_lines.append(indented.strip())
+    combined_inner = (
+        "rx.vstack(\n        "
+        + ",\n        ".join(combined_sections_lines)
+        + ',\n        spacing="6",\n        width="100%",\n    )'
+    )
     view_code = (
         f"def {to_snake_case(page.name)}_page() -> rx.Component:\n"
-        + _wrap_page_body(inner, f"{state_cls}.load_rows", container_width)
+        + _wrap_page_body(
+            combined_inner,
+            "[" + ", ".join(load_exprs) + "]",
+            f"{max_container_width}px",
+        )
     )
-    return state_code, view_code
+    return "\n".join(state_codes), view_code
 
 
 def generate_frontend(program: NovaProgram) -> dict[str, str]:
@@ -1057,7 +1415,7 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         # (`calendar.Calendar.monthdatescalendar` + `datetime.date`) — pas
         # de dépendance JS supplémentaire pour le bloc `calendar`.
         lines.append("import calendar")
-        lines.append("from datetime import date")
+        lines.append("from datetime import date, timedelta")
     lines += [
         "",
         "import httpx",
@@ -1079,7 +1437,7 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         lines.append("")
 
     if has_i18n:
-        lines.append(_generate_lang_state())
+        lines.append(_generate_lang_state(program.active_languages()))
         lines.append("")
         translation_helpers = _generate_translation_helpers(program)
         if translation_helpers:

@@ -11,6 +11,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.0",
     "jinja2>=3.1",
+    "inflect>=7.0",
 ]
 
 [project.optional-dependencies]
@@ -22,9 +23,27 @@ runtime = [
     "bcrypt>=4.0",
     "python-jose[cryptography]>=3.3",
     "python-multipart>=0.0.9",
+    # `application { database: mongodb }` (tâche #29, backend NoSQL généré
+    # par codegen/api_mongo.py) — non requis pour le backend SQL par défaut.
+    "beanie>=1.26",
+    "motor>=3.4",
 ]
 dev = [
     "pytest>=8.0",
+    # Simule un vrai serveur MongoDB pour les tests d'exécution réelle du
+    # backend NoSQL (tests/test_codegen.py, section "backend NoSQL Mongo")
+    # SANS dépendance externe. Versions ÉPINGLÉES exactement (contrairement
+    # au reste de ce fichier) : beanie>=2.x utilise la nouvelle API async de
+    # pymongo>=4.9, que `mongomock-motor` (dernière version 0.0.36 au
+    # moment de l'écriture) ne supporte pas encore complètement — testé et
+    # confirmé fonctionnel avec cette combinaison précise. N'affecte QUE les
+    # tests : le backend NoSQL généré (requirements.txt du projet, ci-dessus
+    # `beanie>=1.26`/`motor>=3.4` sans plafond) tourne sans souci contre un
+    # vrai MongoDB avec une version de beanie plus récente.
+    "beanie==1.26.0",
+    "motor==3.4.0",
+    "pymongo==4.8.0",
+    "mongomock-motor==0.0.34",
 ]
 
 [project.scripts]

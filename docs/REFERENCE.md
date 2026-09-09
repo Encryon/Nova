@@ -290,6 +290,59 @@ page Produits {
   la valeur affichée change immédiatement au changement de langue, sans
   rechargement de page.
 
+## Base de données (prop `database` sur `application`/`app`)
+
+| Mot-clé | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Prop. base de données / Database prop | `base_donnees` / `base_données` | `database` | `base_datos` | `datenbank` | — (`database`) | `banco_dados` |
+
+Contrairement au reste du DSL, les **valeurs** de cette propriété
+(`sqlite`, `postgresql`, `mysql`, `sqlserver`, `oracle`, `mongodb`) sont
+des noms propres non traduits par langue — quelques alias usuels sont
+néanmoins acceptés, déclarés dans `keywords.DATABASE_ENGINES` :
+
+| Moteur | Valeur canonique | Alias acceptés |
+|---|---|---|
+| SQLite (défaut) | `sqlite` | — |
+| PostgreSQL | `postgresql` | `postgres`, `postgre` |
+| MySQL | `mysql` | `mariadb`, `maria` |
+| SQL Server | `sqlserver` | `sql_server`, `mssql` |
+| Oracle | `oracle` | — |
+| MongoDB (NoSQL) | `mongodb` | `mongo` |
+
+```
+application MonApp {
+  base_donnees: postgresql
+}
+```
+
+- Absent de `application { ... }` = `sqlite` (comportement historique
+  inchangé, aucune dépendance supplémentaire).
+- Une valeur inconnue lève une erreur à la compilation listant les
+  valeurs valides (`_validate_app_database` dans `parser.py`).
+- `sqlite`/`postgresql`/`mysql`/`sqlserver`/`oracle` : backend SQLModel
+  inchangé ; seuls la dépendance pilote (`requirements.txt`), l'URL de
+  connexion par défaut et le service `db:` du `docker-compose.yml`/
+  `values.yaml` Helm changent selon le moteur (voir README, section
+  "Base de données").
+- `mongodb`/`mongo` : chemin de génération entièrement différent
+  (modèles [Beanie](https://beanie-odm.dev/), routes `async`), **rejeté
+  à la compilation** (`_validate_mongo_unsupported_features` dans
+  `parser.py`) s'il est combiné avec un bloc `requete`/`query`, un bloc
+  `calendar`/`calendrier`, ou une relation `has_many`/
+  `possede_plusieurs` — voir README, section "Base de données", pour le
+  détail des fonctionnalités supportées malgré tout (auth JWT, email,
+  upload, contenu multilingue, `belongs_to`, `chart` sur entité).
+
+Couvert par `tests/test_parser.py` (section "base sql config" —
+canonicalisation des alias, rejet d'un moteur inconnu, reconnaissance du
+mot-clé `database` dans les 6 langues — et section "backend NoSQL Mongo"
+pour le rejet à la compilation de `requete`/`calendar`/`has_many`) et
+`tests/test_codegen.py` (génération du driver/service/`values.yaml` par
+moteur SQL, et exécution réelle complète — auth JWT, CRUD, unicité,
+validation — du backend Mongo généré via `TestClient` avec
+`mongomock-motor`).
+
 ## Exemple : le même programme en 4 langues / Example: the same program in 4 languages
 
 ```

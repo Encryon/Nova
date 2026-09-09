@@ -4,6 +4,15 @@ from __future__ import annotations
 
 import unicodedata
 
+try:
+    import inflect as _inflect_module
+
+    _INFLECT = _inflect_module.engine()
+except ImportError:  # pragma: no cover - `inflect` est une dépendance du
+    # compilateur (voir pyproject.toml) ; ce filet de sécurité évite
+    # seulement de planter si le paquet n'est, malgré tout, pas installé.
+    _INFLECT = None
+
 
 def to_ascii_identifier(name: str) -> str:
     """
@@ -34,14 +43,46 @@ def to_snake_case(name: str) -> str:
     return "".join(out)
 
 
-def pluralize(name: str) -> str:
-    """Pluriel anglais naïf, suffisant pour un MVP (limitation documentée)."""
-    lower = name.lower()
+def _pluralize_naive(word: str) -> str:
+    """Filet de sécurité si `inflect` n'est pas installé (voir import
+    ci-dessus) — l'ancienne heuristique suffixe-only de ce compilateur,
+    volontairement limitée (pas de pluriel irrégulier)."""
+    lower = word.lower()
     if lower.endswith(("s", "x", "z", "ch", "sh")):
-        return name + "es"
+        return word + "es"
     if lower.endswith("y") and lower[-2:-1] not in "aeiou":
-        return name[:-1] + "ies"
-    return name + "s"
+        return word[:-1] + "ies"
+    return word + "s"
+
+
+def pluralize(name: str) -> str:
+    """Pluriel anglais du nom d'entité, utilisé pour les noms de
+    tables/routes générés. Le nom peut être composé (`ProductCategory`,
+    `product_category`) : ramené en snake_case, seul le DERNIER segment —
+    la tête du composé en anglais — est mis au pluriel (`product_category`
+    -> `product_categories`, jamais `product_categorys` ni
+    `products_category`). Le résultat est renvoyé déjà en snake_case, ce
+    qui rend un éventuel appel englobant `to_snake_case(pluralize(...))`
+    (fait par tous les appelants actuels) idempotent.
+
+    Utilise la bibliothèque `inflect`, qui couvre les pluriels irréguliers
+    anglais (`category` -> `categories`, `person` -> `people`, `child` ->
+    `children`, `property` -> `properties`...) plutôt que la seule
+    heuristique suffixe s/x/z/ch/sh -> es, y -> ies de l'ancienne version —
+    reste malgré tout un pluriel ANGLAIS uniquement, y compris pour un nom
+    d'entité déclaré dans une autre langue du DSL (limitation documentée :
+    NOVA ne pluralise pas en français/espagnol/etc.)."""
+    snake = to_snake_case(name)
+    if not snake:
+        return snake
+    parts = snake.split("_")
+    last = parts[-1]
+    if _INFLECT is not None:
+        plural_last = _INFLECT.plural(last) if last else last
+    else:  # pragma: no cover
+        plural_last = _pluralize_naive(last)
+    parts[-1] = plural_last or last
+    return "_".join(parts)
 
 
 # Types NOVA canoniques -> types Python

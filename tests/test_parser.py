@@ -214,6 +214,98 @@ def test_query_block_defaults_sort_direction_to_asc():
     assert q.order_dir == "asc"
 
 
+def test_query_block_combines_top_level_filters_with_and():
+    # Plusieurs `filtre:` de premier niveau (sans bloc `ou:`) : comportement
+    # historique inchangé, tous ET-és entre eux dans `q.filters`.
+    src = """
+    entity Produit {
+      field nom: string
+      field prix: float
+      field stock: int
+    }
+    requete Cible sur Produit {
+      filtre: prix > 10
+      filtre: stock < 100
+    }
+    """
+    program = parse_source(src)
+    q = program.queries[0]
+    assert len(q.filters) == 2
+    assert q.filter_groups == []
+    assert (q.filters[0].field, q.filters[0].op, q.filters[0].value) == ("prix", ">", 10)
+    assert (q.filters[1].field, q.filters[1].op, q.filters[1].value) == ("stock", "<", 100)
+
+
+def test_query_block_or_group_parses_into_filter_groups():
+    src = """
+    entity Produit {
+      field nom: string
+      field prix: float
+      field stock: int
+    }
+    requete Cible sur Produit {
+      filtre: stock < 10
+      ou: {
+        filtre: prix < 10
+        filtre: prix > 1000
+      }
+    }
+    """
+    program = parse_source(src)
+    q = program.queries[0]
+    assert len(q.filters) == 1
+    assert q.filters[0].field == "stock"
+    assert len(q.filter_groups) == 1
+    group = q.filter_groups[0]
+    assert [(f.field, f.op, f.value) for f in group.filters] == [
+        ("prix", "<", 10),
+        ("prix", ">", 1000),
+    ]
+
+
+def test_query_block_multiple_or_groups_each_anded_separately():
+    src = """
+    entity Produit {
+      field nom: string
+      field prix: float
+      field stock: int
+      field categorie: string
+    }
+    requete Cible sur Produit {
+      ou: {
+        filtre: prix < 10
+        filtre: prix > 1000
+      }
+      ou: {
+        filtre: stock == 0
+        filtre: categorie == "Promo"
+      }
+    }
+    """
+    program = parse_source(src)
+    q = program.queries[0]
+    assert len(q.filter_groups) == 2
+    assert len(q.filter_groups[0].filters) == 2
+    assert len(q.filter_groups[1].filters) == 2
+
+
+def test_query_or_keyword_recognizes_all_six_languages():
+    # ou (fr/pt) | or (en) | oder (de) | o (es/it)
+    sources = {
+        "fr": 'entity P { field n: string field v: int }\nrequete Q sur P { ou: { filtre: v < 1 filtre: v > 9 } }',
+        "en": 'entity P { field n: string field v: int }\nquery Q on P { or: { filter: v < 1 filter: v > 9 } }',
+        "de": 'entity P { field n: string field v: int }\nquery Q von P { oder: { filter: v < 1 filter: v > 9 } }',
+        "es": 'entity P { field n: string field v: int }\nconsulta Q en P { o: { filtro: v < 1 filtro: v > 9 } }',
+        "it": 'entity P { field n: string field v: int }\ninterrogazione Q su P { o: { filtro: v < 1 filtro: v > 9 } }',
+        "pt": 'entity P { field n: string field v: int }\nquery Q em P { ou: { filter: v < 1 filter: v > 9 } }',
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        q = program.queries[0]
+        assert len(q.filter_groups) == 1, lang
+        assert len(q.filter_groups[0].filters) == 2, lang
+
+
 def test_style_block_parses_props_on_page_show():
     src = """
     entity Produit {
@@ -237,6 +329,27 @@ def test_page_show_without_style_block_has_empty_style_dict():
         "entity X { field n: string }\npage P { show X as table }"
     )
     assert program.pages[0].shows[0].style == {}
+
+
+def test_page_with_multiple_show_blocks_parses_all_of_them_in_order():
+    # Page multi-entités : plusieurs `show` sur le même bloc `page`, déjà
+    # accepté par la grammaire (`page_stmt*`) et l'AST (`Page.shows: list`)
+    # — seule la génération de code se limitait au premier (voir
+    # codegen/ui_reflex.py::_generate_state_and_view).
+    src = """
+    entity Produit { field nom: string required }
+    entity Commande { field client: string required }
+    page Dashboard {
+      show Produit as table titre "Produits"
+      show Commande as card titre "Commandes"
+    }
+    """
+    program = parse_source(src)
+    page = program.pages[0]
+    assert len(page.shows) == 2
+    assert [s.entity for s in page.shows] == ["Produit", "Commande"]
+    assert [s.mode for s in page.shows] == ["table", "card"]
+    assert [s.title for s in page.shows] == ["Produits", "Commandes"]
 
 
 def test_auth_and_query_blocks_recognize_all_six_languages():
@@ -409,6 +522,89 @@ def test_chart_sur_unknown_source_raises_syntax_error():
         parse_source(src)
 
 
+def test_chart_type_keyword_recognizes_radar_and_scatter_all_six_languages():
+    types = {
+        "radar": "radar", "radial": "radar", "araignee": "radar", "araignée": "radar",
+        "scatter": "scatter", "nuage": "scatter", "dispersion": "scatter",
+        "streudiagramm": "scatter", "dispersao": "scatter", "dispersão": "scatter",
+    }
+    for word, canonical in types.items():
+        src = f"""
+        entity P {{ field n: string }}
+        chart C sur P {{ type: {word} }}
+        """
+        program = parse_source(src)
+        assert program.charts[0].type == canonical, word
+
+
+def test_chart_multi_series_axe_y_parses_into_y_fields_list():
+    src = """
+    entity Mesure {
+        field jour: string required
+        field ventes: int required
+        field couts: int required
+        field marge: int required
+    }
+    chart C sur Mesure {
+        type: bar
+        axe_x: jour
+        axe_y: ventes, couts, marge
+    }
+    """
+    program = parse_source(src)
+    chart = program.charts[0]
+    assert chart.y_fields == ["ventes", "couts", "marge"]
+    # `y_field` (compatibilité) reste la première série.
+    assert chart.y_field == "ventes"
+
+
+def test_chart_single_series_still_populates_y_fields_with_one_element():
+    src = """
+    entity Mesure { field jour: string field ventes: int }
+    chart C sur Mesure { type: line axe_x: jour axe_y: ventes }
+    """
+    program = parse_source(src)
+    chart = program.charts[0]
+    assert chart.y_field == "ventes"
+    assert chart.y_fields == ["ventes"]
+
+
+def test_chart_multi_series_rejected_for_pie_radar_scatter_types():
+    for chart_type in ("pie", "radar", "scatter"):
+        src = f"""
+        entity Mesure {{
+            field jour: string required
+            field ventes: int required
+            field couts: int required
+        }}
+        chart C sur Mesure {{
+            type: {chart_type}
+            axe_x: jour
+            axe_y: ventes, couts
+        }}
+        """
+        with pytest.raises(NovaSyntaxError):
+            parse_source(src)
+
+
+def test_chart_multi_series_accepted_for_bar_line_area_types():
+    for chart_type in ("bar", "line", "area"):
+        src = f"""
+        entity Mesure {{
+            field jour: string required
+            field ventes: int required
+            field couts: int required
+        }}
+        chart C sur Mesure {{
+            type: {chart_type}
+            axe_x: jour
+            axe_y: ventes, couts
+        }}
+        """
+        program = parse_source(src)
+        assert program.charts[0].y_fields == ["ventes", "couts"]
+
+
 def test_rich_field_types_file_image_color_recognize_all_six_languages():
     # file/fichier/archivo/datei/(file)/arquivo, image/imagen/bild/immagine/
     # imagem, color/couleur/farbe/colore/cor — voir keywords.TYPES.
@@ -494,6 +690,72 @@ def test_notifier_without_email_block_raises_syntax_error():
     """
     with pytest.raises(NovaSyntaxError):
         parse_source(src)
+
+
+def test_notify_recipient_and_attachment_stmt_parse_and_validate():
+    src = """
+    entity Produit {
+      field nom: string required
+      field contact: string required
+      field photo: image
+    }
+    email { hote: "s" }
+    api Produit {
+      creer
+      notifier: creer
+      destinataire: contact
+      piece_jointe: photo
+    }
+    """
+    program = parse_source(src)
+    api = program.apis[0]
+    assert api.notify_recipient_field == "contact"
+    assert api.notify_attachment_field == "photo"
+
+
+def test_notify_recipient_unknown_field_raises_syntax_error():
+    src = """
+    entity Produit { field nom: string required }
+    email { hote: "s" }
+    api Produit { creer notifier: creer destinataire: inconnu }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_notify_attachment_wrong_type_raises_syntax_error():
+    src = """
+    entity Produit { field nom: string required }
+    email { hote: "s" }
+    api Produit { creer notifier: creer piece_jointe: nom }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_notify_recipient_and_attachment_keywords_recognize_all_six_languages():
+    # destinataire (fr) | recipient (en) | destinatario (es/it/pt) |
+    # empfaenger (de) ; piece_jointe (fr) | attachment (en) | adjunto (es) |
+    # allegato (it) | anexo (pt) | anhang (de).
+    sources = {
+        "fr": 'entity P { field n: string field c: string field f: file }\n'
+        'email { hote: "s" }\napi P { creer notifier: creer destinataire: c piece_jointe: f }',
+        "en": 'entity P { field n: string field c: string field f: file }\n'
+        'email { host: "s" }\napi P { create notifier: create recipient: c attachment: f }',
+        "es": 'entity P { field n: string field c: string field f: file }\n'
+        'email { host: "s" }\napi P { create notifier: create destinatario: c adjunto: f }',
+        "de": 'entity P { field n: string field c: string field f: file }\n'
+        'email { host: "s" }\napi P { create notifier: create empfaenger: c anhang: f }',
+        "it": 'entity P { field n: string field c: string field f: file }\n'
+        'email { host: "s" }\napi P { create notifier: create destinatario: c allegato: f }',
+        "pt": 'entity P { field n: string field c: string field f: file }\n'
+        'email { host: "s" }\napi P { create notifier: create destinatario: c anexo: f }',
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        api = program.apis[0]
+        assert api.notify_recipient_field == "c", lang
+        assert api.notify_attachment_field == "f", lang
 
 
 def test_calendar_block_parses_explicit_date_and_title_fields():
@@ -713,3 +975,442 @@ def test_page_title_unknown_translation_key_raises_syntax_error():
     """
     with pytest.raises(NovaSyntaxError):
         parse_source(src)
+
+
+# ------------------------------------------------------------- relations ---
+
+
+def test_has_many_and_belongs_to_parse_and_validate_together():
+    """`entity Parent { has_many Child }` + `entity Child { belongs_to
+    Parent }` — les deux côtés de la relation se retrouvent bien sur
+    l'entité correspondante, et `_validate_relations` (parser.py) l'accepte
+    sans erreur (cas nominal, les deux côtés déclarés)."""
+    src = """
+    entity Parent {
+      field name: string required
+      has_many Child
+    }
+    entity Child {
+      field label: string required
+      belongs_to Parent
+    }
+    """
+    program = parse_source(src)
+    parent = program.get_entity("Parent")
+    child = program.get_entity("Child")
+    assert [(r.kind, r.target) for r in parent.relations] == [("has_many", "Child")]
+    assert [(r.kind, r.target) for r in child.relations] == [("belongs_to", "Parent")]
+
+
+def test_has_many_unknown_target_raises_syntax_error():
+    src = """
+    entity Parent {
+      field name: string required
+      has_many Ghost
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_has_many_without_reciprocal_belongs_to_raises_syntax_error():
+    """`has_many Child` sans `belongs_to Parent` du côté de `Child` doit être
+    rejeté : sans colonne de clé étrangère générée, le compilateur n'aurait
+    aucun moyen de retrouver les enregistrements liés (voir
+    `_has_many_relation_info` dans codegen/api_fastapi.py)."""
+    src = """
+    entity Parent {
+      field name: string required
+      has_many Child
+    }
+    entity Child {
+      field label: string required
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_has_many_and_belongs_to_keywords_recognize_all_six_languages():
+    for has_many_kw, belongs_to_kw in [
+        ("has_many", "belongs_to"),
+        ("possede_plusieurs", "appartient_a"),
+        ("tiene_muchos", "pertenece_a"),
+        ("hat_viele", "gehoert_zu"),
+        ("ha_molti", "appartiene_a"),
+        ("tem_muitos", "pertence_a"),
+    ]:
+        src = f"""
+        entity Parent {{
+          field name: string required
+          {has_many_kw} Child
+        }}
+        entity Child {{
+          field label: string required
+          {belongs_to_kw} Parent
+        }}
+        """
+        program = parse_source(src)
+        assert program.get_entity("Parent").relations[0].kind == "has_many"
+        assert program.get_entity("Child").relations[0].kind == "belongs_to"
+
+
+# ------------------------------------------------------------ validation ---
+
+
+def test_validation_block_parses_rule_and_message():
+    src = """
+    entity Reservation {
+      field date_debut: datetime required
+      field date_fin: datetime required
+    }
+    validation DatesCoherentes on Reservation {
+      rule: date_fin > date_debut message: "La date de fin doit etre apres le debut."
+    }
+    """
+    program = parse_source(src)
+    assert len(program.validations) == 1
+    v = program.validations[0]
+    assert v.name == "DatesCoherentes"
+    assert v.entity == "Reservation"
+    assert len(v.rules) == 1
+    rule = v.rules[0]
+    assert (rule.field_a, rule.op, rule.field_b) == ("date_fin", ">", "date_debut")
+    assert rule.message == "La date de fin doit etre apres le debut."
+
+
+def test_validation_block_supports_multiple_rules():
+    src = """
+    entity Produit {
+      field prix: float required
+      field prix_remise: float required
+      field stock_min: int required
+      field stock_max: int required
+    }
+    validation ProduitCoherent on Produit {
+      rule: prix_remise <= prix message: "Le prix remise doit etre inferieur ou egal au prix."
+      rule: stock_max >= stock_min message: "Le stock max doit etre superieur ou egal au stock min."
+    }
+    """
+    program = parse_source(src)
+    assert len(program.validations[0].rules) == 2
+
+
+def test_validation_unknown_entity_raises_syntax_error():
+    src = """
+    entity Produit { field prix: float required }
+    validation X on Ghost {
+      rule: prix > prix message: "x"
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_validation_unknown_field_raises_syntax_error():
+    src = """
+    entity Produit { field prix: float required }
+    validation X on Produit {
+      rule: prix > inconnu message: "x"
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_validation_ordering_operator_on_non_orderable_type_raises_syntax_error():
+    src = """
+    entity Produit {
+      field nom: string required
+      field slug: string required
+    }
+    validation X on Produit {
+      rule: nom > slug message: "x"
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_validation_equality_operator_allowed_on_any_type():
+    """`==`/`!=` (contrairement à `>`/`<`/`>=`/`<=`) ne nécessitent pas des
+    champs numériques/date : comparer deux chaînes pour égalité a du sens
+    (ex. confirmation de mot de passe/email)."""
+    src = """
+    entity Compte {
+      field email: string required
+      field email_confirmation: string required
+    }
+    validation EmailConfirme on Compte {
+      rule: email == email_confirmation message: "Les deux emails doivent etre identiques."
+    }
+    """
+    program = parse_source(src)
+    assert program.validations[0].rules[0].op == "=="
+
+
+def test_validation_rejects_reference_and_multilingual_fields():
+    src_ref = """
+    entity Auteur { field nom: string required }
+    entity Livre {
+      field titre: string required
+      field auteur: Auteur
+    }
+    validation X on Livre {
+      rule: titre > auteur message: "x"
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src_ref)
+
+    src_ml = """
+    entity Produit {
+      field description: text multilingual
+      field prix: float required
+    }
+    validation X on Produit {
+      rule: prix > description message: "x"
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src_ml)
+
+
+def test_validation_keyword_recognizes_all_six_languages():
+    for validation_kw, rule_kw, message_kw in [
+        ("validation", "regle", "message"),
+        ("validation", "rule", "message"),
+        ("validación", "regla", "mensaje"),
+        ("validierung", "regel", "nachricht"),
+        ("validazione", "regola", "messaggio"),
+        ("validação", "regra", "mensagem"),
+    ]:
+        src = f"""
+        entity P {{
+          field a: int required
+          field b: int required
+        }}
+        {validation_kw} X sur P {{
+          {rule_kw}: a > b {message_kw}: "x"
+        }}
+        """
+        program = parse_source(src)
+        assert program.validations[0].rules[0].message == "x"
+
+
+# --------------------------------------------------------------- i18n cfg ---
+
+
+def test_app_languages_restricts_active_languages():
+    src = """
+    application Boutique {
+      nom: "Boutique"
+      langues: fr, en
+    }
+    entity P { field n: string }
+    """
+    program = parse_source(src)
+    assert program.app.languages == ["fr", "en"]
+    assert program.active_languages() == ["fr", "en"]
+
+
+def test_active_languages_defaults_to_all_six_without_app_languages():
+    src = """
+    entity P { field n: string }
+    """
+    program = parse_source(src)
+    assert program.active_languages() == ["fr", "en", "es", "de", "it", "pt"]
+
+    src2 = """
+    application Boutique { nom: "Boutique" }
+    entity P { field n: string }
+    """
+    program2 = parse_source(src2)
+    assert program2.app.languages == []
+    assert program2.active_languages() == ["fr", "en", "es", "de", "it", "pt"]
+
+
+def test_app_languages_unknown_code_raises_syntax_error():
+    src = """
+    application Boutique {
+      nom: "Boutique"
+      langues: fr, ja
+    }
+    entity P { field n: string }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_app_languages_default_lang_must_be_in_active_set():
+    src = """
+    application Boutique {
+      nom: "Boutique"
+      langue: es
+      langues: fr, en
+    }
+    entity P { field n: string }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_translations_block_only_requires_active_languages():
+    """Avec `langues: fr, en`, un bloc `traductions` ne doit fournir QUE
+    ces deux langues (pas les 6 du DSL) — voir _validate_translations."""
+    src = """
+    application Boutique {
+      nom: "Boutique"
+      langues: fr, en
+    }
+    entity P { field n: string }
+    traductions {
+      titre { fr: "Titre" en: "Title" }
+    }
+    """
+    program = parse_source(src)
+    assert program.translations["titre"] == {"fr": "Titre", "en": "Title"}
+
+
+def test_translations_block_still_requires_all_six_without_app_languages():
+    """Non-régression : sans `application { langues: ... }`, le
+    comportement historique (6 langues requises) est inchangé."""
+    src = """
+    entity P { field n: string }
+    traductions {
+      titre { fr: "Titre" en: "Title" }
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_languages_keyword_recognizes_all_six_languages():
+    for languages_kw in ["langues", "languages", "idiomas", "sprachen", "lingue"]:
+        src = f"""
+        application Boutique {{
+          nom: "Boutique"
+          {languages_kw}: fr, es
+        }}
+        entity P {{ field n: string }}
+        """
+        program = parse_source(src)
+        assert program.app.languages == ["fr", "es"]
+
+
+# --------------------------------------------- application { database } ---
+
+
+def test_app_database_defaults_to_sqlite_when_absent():
+    src = """
+    application Boutique { nom: "Boutique" }
+    entity P { field n: string }
+    """
+    program = parse_source(src)
+    assert program.database_engine() == "sqlite"
+
+
+def test_app_database_accepts_common_aliases_and_canonicalizes():
+    cases = {
+        "postgres": "postgresql",
+        "postgresql": "postgresql",
+        "mysql": "mysql",
+        "mariadb": "mysql",
+        "sqlserver": "sqlserver",
+        "mssql": "sqlserver",
+        "oracle": "oracle",
+        "sqlite": "sqlite",
+        "mongodb": "mongodb",
+        "mongo": "mongodb",
+    }
+    for raw, canonical in cases.items():
+        src = f"""
+        application Boutique {{
+          nom: "Boutique"
+          database: {raw}
+        }}
+        entity P {{ field n: string }}
+        """
+        program = parse_source(src)
+        assert program.database_engine() == canonical, raw
+
+
+def test_app_database_unknown_engine_raises_syntax_error():
+    src = """
+    application Boutique {
+      nom: "Boutique"
+      database: db2
+    }
+    entity P { field n: string }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_database_keyword_recognizes_all_six_languages():
+    for database_kw in ["database", "base_donnees", "base_données", "base_datos", "datenbank", "banco_dados"]:
+        src = f"""
+        application Boutique {{
+          nom: "Boutique"
+          {database_kw}: postgresql
+        }}
+        entity P {{ field n: string }}
+        """
+        program = parse_source(src)
+        assert program.database_engine() == "postgresql"
+
+
+# ------------------------------------------- mongodb (backend NoSQL, tâche #29) ---
+
+
+def test_mongo_backend_rejects_query_calendar_and_has_many():
+    base = """
+    application Boutique {
+      nom: "Boutique"
+      database: mongodb
+    }
+    entity Produit { field prix: entier }
+    """
+    with pytest.raises(NovaSyntaxError, match="mongodb"):
+        parse_source(base + '\nrequete Cher sur Produit { filtre: prix > 10 }\n')
+
+    with pytest.raises(NovaSyntaxError, match="mongodb"):
+        parse_source(
+            base
+            + "\nentity Cal { field d: date_heure }"
+            + "\ncalendrier Agenda sur Cal { champ_date: d }\n"
+        )
+
+    has_many_src = """
+    application Boutique {
+      nom: "Boutique"
+      database: mongodb
+    }
+    entity Produit { field prix: entier possede_plusieurs Ligne }
+    entity Ligne { field n: chaine appartient_a Produit }
+    """
+    with pytest.raises(NovaSyntaxError, match="mongodb"):
+        parse_source(has_many_src)
+
+
+def test_mongo_backend_allows_validation_email_auth_and_chart_on_entity():
+    """Les fonctionnalités backend-agnostiques (voir la docstring de
+    codegen/api_mongo.py) restent utilisables avec `database: mongodb` —
+    seuls `requete`/`calendar`/`has_many` sont rejetés."""
+    src = """
+    application Boutique {
+      nom: "Boutique"
+      database: mongodb
+    }
+    auth { roles: admin, user }
+    email { host: "smtp.example.com" from: "a@b.com" to: "c@d.com" }
+    entity Produit {
+      field nom: chaine requis
+      field prix: entier requis
+    }
+    api Produit { liste creer notifier: creer }
+    chart Prix sur Produit { type: bar axe_x: nom axe_y: prix }
+    validation PrixPositif sur Produit { regle: prix > prix message: "x" }
+    """
+    program = parse_source(src)
+    assert program.database_engine() == "mongodb"

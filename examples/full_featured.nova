@@ -35,6 +35,26 @@ entité Produit {
   champ couleur: couleur
   champ disponible: booleen
   champ date_ajout: date_heure
+  // Relation has_many : Produit "possède plusieurs" Accessoire.
+  // `_validate_relations` (parser.py) exige que `Accessoire` déclare bien un
+  // `appartient_a Produit` en retour (voir plus bas) — sinon aucune clé
+  // étrangère ne permettrait de retrouver les accessoires d'un produit.
+  // NB : nommée `Accessoire` plutôt que `Commande` pour ne pas entrer en
+  // collision avec l'entité `Commande` d'un autre fichier .nova de test
+  // (`_EMAIL_NOVA`) exécuté en réel dans le même process pytest — voir la
+  // contrainte de registre SQLAlchemy documentée sur
+  // `test_auth_and_query_flow_end_to_end`.
+  possede_plusieurs Accessoire
+}
+
+// Entité "enfant" de la relation has_many ci-dessus. `api Produit { ...
+// liste/obtenir }` matérialise le résumé texte des Accessoire liés
+// (`accessoires_text`, voir api_fastapi._has_many_relation_info) sur
+// CHAQUE produit renvoyé — affiché ensuite en table/carte côté frontend
+// (voir ui_reflex._has_many_text_fields).
+entité Accessoire {
+  champ nom: chaine requis
+  appartient_a Produit
 }
 
 auth {
@@ -46,13 +66,30 @@ api Produit {
   créer
   modifier
   supprimer
+  obtenir
   proteger: admin
+}
+
+api Accessoire {
+  liste
+  créer
 }
 
 requete ProduitsChers sur Produit {
   filtre: prix > 100
   trier_par: prix desc
   limite: 10
+}
+
+// Filtres combinés ET/OU : `filtre:` de premier niveau (ET, comportement
+// historique) + un bloc `ou: { ... }` (OU entre ses filtres, lui-même ET-é
+// avec le reste) -> WHERE stock < 10 AND (prix < 10 OR prix > 1000).
+requete ProduitsAlerte sur Produit {
+  filtre: stock < 10
+  ou: {
+    filtre: prix < 10
+    filtre: prix > 1000
+  }
 }
 
 page Produits {
@@ -90,9 +127,46 @@ chart TopProduitsChers sur ProduitsChers {
   titre: "Top produits chers"
 }
 
+// Graphique multi-séries (`axe_y` avec plusieurs champs séparés par des
+// virgules) : seuls bar/line/area l'acceptent (kw.CHART_MULTI_SERIES_TYPES).
+chart PrixEtStock sur Produit {
+  type: barres
+  axe_x: nom
+  axe_y: prix, stock
+  titre: "Prix et stock par produit"
+}
+
+// Graphique radar (nouveau type, une seule série).
+chart ProfilProduit sur Produit {
+  type: radar
+  axe_x: nom
+  axe_y: prix
+  titre: "Profil produit"
+}
+
+// Graphique nuage de points (nouveau type, une seule série).
+chart NuagePrix sur Produit {
+  type: nuage
+  axe_x: nom
+  axe_y: prix
+  titre: "Nuage de prix"
+}
+
 // Calendrier sur l'entité (protégé, hérite de `api Produit { proteger: admin }`) :
 // vue mensuelle des produits par date d'ajout.
 calendrier Ajouts sur Produit {
   champ_date: date_ajout
   champ_titre: nom
+}
+
+// Page multi-entités : deux `afficher` sur la MÊME entité Produit, dans
+// deux modes différents (table puis carte). Exerce à la fois l'empilement
+// multi-sections (un state Reflex par `afficher`, chargés ensemble via
+// `on_mount=[...]`) ET la désambiguïsation de nom de state quand la même
+// entité apparaît deux fois sur une page (voir `_state_class_name`, suffixe
+// numérique `<NomPage><Entite><N>State` sinon les deux `afficher`
+// produiraient le même nom de classe et le second écraserait le premier).
+page TableauBord {
+  afficher Produit comme table titre "Tous les produits"
+  afficher Produit comme carte titre "Fiches (aperçu)"
 }

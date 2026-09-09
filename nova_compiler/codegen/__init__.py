@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..ast_nodes import NovaProgram
 from .api_fastapi import generate_backend, generate_backend_scaffold
+from .api_mongo import generate_backend_mongo, generate_backend_scaffold_mongo
 from .docker import generate_docker
 from .k8s import generate_k8s
 from .ui_reflex import generate_frontend, generate_frontend_scaffold
@@ -43,8 +44,15 @@ def generate_project(program: NovaProgram, output_dir: str | Path, source_dir: s
       sur mesure, UI hors DSL...), qui survit donc aux recompilations.
     """
     out = Path(output_dir)
+    # `application { database: mongodb }` (tâche #29) : backend NoSQL
+    # (Beanie/Motor, codegen/api_mongo.py) entièrement distinct du backend
+    # SQL par défaut — voir sa docstring pour les limites assumées de ce
+    # MVP (pas de `requete`/query, `calendar`, `has_many` matérialisé,
+    # rejetés à la compilation par parser._validate_mongo_unsupported_
+    # features plutôt que silencieusement ignorés).
+    is_mongo = program.database_engine() == "mongodb"
     files: dict[str, str] = {}
-    files.update(generate_backend(program))
+    files.update(generate_backend_mongo(program) if is_mongo else generate_backend(program))
     files.update(generate_frontend(program))
     files.update(generate_docker(program))
     files.update(generate_k8s(program))
@@ -69,7 +77,7 @@ def generate_project(program: NovaProgram, output_dir: str | Path, source_dir: s
                     target.write_bytes(candidate.read_bytes())
 
     scaffold_files: dict[str, str] = {}
-    scaffold_files.update(generate_backend_scaffold())
+    scaffold_files.update(generate_backend_scaffold_mongo() if is_mongo else generate_backend_scaffold())
     scaffold_files.update(generate_frontend_scaffold(program))
     for rel_path, content in scaffold_files.items():
         target = out / rel_path

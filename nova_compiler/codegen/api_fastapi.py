@@ -8,9 +8,9 @@ delete/get, dans n'importe quelle langue à l'origine).
 
 from __future__ import annotations
 
+from .. import keywords as kw
 from ..ast_nodes import Email as _Email
 from ..ast_nodes import Entity, NovaProgram, QueryFilter
-from ..keywords import LANG_CODES
 from .utils import PY_TYPE_MAP, pluralize, to_ascii_identifier, to_pascal_case, to_snake_case
 
 _HEADER = (
@@ -31,29 +31,31 @@ def _table_name(entity: Entity) -> str:
     return to_snake_case(pluralize(to_ascii_identifier(entity.name)))
 
 
-def _multilingual_column_names(f) -> list[str]:
+def _multilingual_column_names(f, active_langs: list[str]) -> list[str]:
     """Un champ `chaine`/`texte multilingue` devient une colonne par langue
-    (`<champ>_fr`, `<champ>_en`, ... `<champ>_pt`) plutôt qu'une seule
-    colonne — toujours les 6 langues du DSL (`keywords.LANG_CODES`), voir
-    parser._validate_multilingual_fields pour les contraintes associées."""
+    ACTIVE du projet (`<champ>_fr`, `<champ>_en`, ... — toutes les 6 langues
+    du DSL par défaut, ou le sous-ensemble choisi via `application {
+    langues: fr, en }`, voir `NovaProgram.active_languages`), pas une seule
+    colonne. Voir parser._validate_multilingual_fields pour les contraintes
+    associées."""
     base = to_snake_case(f.name)
-    return [f"{base}_{lang}" for lang in LANG_CODES]
+    return [f"{base}_{lang}" for lang in active_langs]
 
 
-def _multilingual_model_lines(f) -> list[str]:
+def _multilingual_model_lines(f, active_langs: list[str]) -> list[str]:
     """Colonnes de table SQLModel pour un champ multilingue : toutes
     `Optional[str]` (voir parser._validate_multilingual_fields — `requis`/
     `unique`/`motif` sont interdits sur un champ `multilingue` dans ce
     MVP, donc pas de cas à gérer ici au-delà d'un simple champ optionnel)."""
-    return [f"    {col}: Optional[str] = Field(default=None)" for col in _multilingual_column_names(f)]
+    return [f"    {col}: Optional[str] = Field(default=None)" for col in _multilingual_column_names(f, active_langs)]
 
 
-def _multilingual_schema_lines(f) -> list[str]:
+def _multilingual_schema_lines(f, active_langs: list[str]) -> list[str]:
     """Mêmes colonnes que `_multilingual_model_lines`, pour les schémas
     Create/Update — syntaxe légèrement différente (pas de `Field(...)`),
     cohérente avec le reste de `_generate_models` pour un champ optionnel
     sans contrainte."""
-    return [f"    {col}: Optional[str] = None" for col in _multilingual_column_names(f)]
+    return [f"    {col}: Optional[str] = None" for col in _multilingual_column_names(f, active_langs)]
 
 
 def _field_line(entity: Entity, f) -> str:
@@ -81,7 +83,74 @@ def _field_line(entity: Entity, f) -> str:
         )
 
 
+def _relation_display_field(entity: Entity):
+    """Choisit le champ « titre » d'une entité enfant pour résumer ses
+    enregistrements liés (relation `has_many`, voir `_generate_router`) :
+    le premier champ simple (ni référence, ni multilingue — un champ
+    multilingue serait éclaté en 6 colonnes, trop de complexité pour un
+    simple résumé) déclaré sur l'entité, ou `None` si elle n'en a aucun
+    (repli sur son `id`, voir les appelants)."""
+    for f in entity.fields:
+        if not f.is_reference and not f.multilingual:
+            return f
+    return None
+
+
+def _has_many_relation_info(entity: Entity, program: NovaProgram):
+    """Pour chaque relation `has_many` de `entity` dont la cible existe et
+    porte bien un `belongs_to` en retour (garanti par
+    `parser._validate_relations` à la compilation — ici on ignore
+    simplement une relation invalide plutôt que de planter, au cas où cette
+    fonction soit appelée sur un AST construit à la main dans un test),
+    retourne un tuple (classe_python_enfant, table_enfant, colonne_cle_
+    etrangere_cote_enfant, nom_du_champ_resume_texte, attribut_python_du_
+    champ_titre_ou_None)."""
+    info = []
+    for rel in entity.relations:
+        if rel.kind != "has_many":
+            continue
+        child = program.get_entity(rel.target)
+        if child is None:
+            continue
+        child_cls = to_pascal_case(child.name)
+        child_table = _table_name(child)
+        fk_col = to_snake_case(entity.name) + "_id"
+        text_field = f"{child_table}_text"
+        display_field = _relation_display_field(child)
+        display_attr = to_snake_case(display_field.name) if display_field else "id"
+        info.append((child_cls, child_table, fk_col, text_field, display_attr))
+    return info
+
+
+def _validation_check_lines(entity: Entity, program: NovaProgram, indent: str = "    ") -> list[str]:
+    """Lignes Python vérifiant chaque `validation <Nom> sur <Entite> {
+    regle: ... message: "..." }` ciblant cette entité (voir
+    `parser._validate_validations`, qui garantit que les deux champs de
+    chaque règle existent et sont d'un type comparable) — insérées après
+    que `item` porte l'état final de l'enregistrement (juste avant
+    `session.add(item)`, aussi bien en `create` qu'en `update` : en update,
+    APRÈS la boucle `setattr` qui applique le payload, pour valider l'état
+    RÉSULTANT, pas seulement les champs modifiés). Une valeur `None` sur
+    l'un des deux champs (champ optionnel non renseigné) désactive
+    silencieusement la règle plutôt que de lever une TypeError sur une
+    comparaison avec `None`."""
+    out = []
+    for validation in program.validations:
+        if validation.entity != entity.name:
+            continue
+        for rule in validation.rules:
+            a = to_snake_case(rule.field_a)
+            b = to_snake_case(rule.field_b)
+            out.append(
+                f"{indent}if item.{a} is not None and item.{b} is not None "
+                f"and not (item.{a} {rule.op} item.{b}):"
+            )
+            out.append(f'{indent}    raise HTTPException(status_code=422, detail={rule.message!r})')
+    return out
+
+
 def _generate_models(program: NovaProgram) -> str:
+    active_langs = program.active_languages()
     lines = [
         _HEADER,
         "from __future__ import annotations",
@@ -103,7 +172,7 @@ def _generate_models(program: NovaProgram) -> str:
         lines.append("    id: Optional[int] = Field(default=None, primary_key=True)")
         for f in entity.fields:
             if f.multilingual:
-                lines += _multilingual_model_lines(f)
+                lines += _multilingual_model_lines(f, active_langs)
             else:
                 lines.append(_field_line(entity, f))
         for rel in entity.relations:
@@ -130,7 +199,7 @@ def _generate_models(program: NovaProgram) -> str:
             lines.append("    pass")
         for f in body:
             if f.multilingual:
-                lines += _multilingual_schema_lines(f)
+                lines += _multilingual_schema_lines(f, active_langs)
                 continue
             py_type = PY_TYPE_MAP.get(f.type, "str") if not f.is_reference else "int"
             type_hint = py_type if f.required else f"Optional[{py_type}]"
@@ -150,7 +219,7 @@ def _generate_models(program: NovaProgram) -> str:
             lines.append("    pass")
         for f in body:
             if f.multilingual:
-                lines += _multilingual_schema_lines(f)
+                lines += _multilingual_schema_lines(f, active_langs)
                 continue
             py_type = PY_TYPE_MAP.get(f.type, "str") if not f.is_reference else "int"
             if f.pattern:
@@ -164,11 +233,41 @@ def _generate_models(program: NovaProgram) -> str:
         lines.append("")
         lines.append("")
 
+        # Schéma de lecture supplémentaire, uniquement pour les entités
+        # portant au moins un `has_many` : les actions `liste`/`get` de
+        # `_generate_router` matérialisent alors les enregistrements liés
+        # sous la forme d'un résumé texte par relation (`<table_enfant>_
+        # text`, voir `_has_many_relation_info`) — un champ que `{cls}` (le
+        # modèle de table) ne porte pas, d'où ce schéma dédié utilisé comme
+        # `response_model` pour ces deux actions seulement (create/update/
+        # delete continuent de renvoyer `{cls}`, inchangés).
+        has_many_info = _has_many_relation_info(entity, program)
+        if has_many_info:
+            lines.append(f"class {cls}Read(SQLModel):")
+            lines.append("    id: Optional[int] = None")
+            for f in entity.fields:
+                if f.multilingual:
+                    lines += [f"    {col}: Optional[str] = None" for col in _multilingual_column_names(f, active_langs)]
+                    continue
+                py_type = PY_TYPE_MAP.get(f.type, "str") if not f.is_reference else "int"
+                lines.append(f"    {to_snake_case(f.name)}: Optional[{py_type}] = None")
+            for fk_name in fk_field_names:
+                lines.append(f"    {fk_name}: Optional[int] = None")
+            for _child_cls, _child_table, _fk_col, text_field, _display_attr in has_many_info:
+                lines.append(f'    {text_field}: str = ""')
+            lines.append("")
+            lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
-def _generate_database() -> str:
-    return _HEADER + '''
+def _generate_database(engine: str) -> str:
+    # URL de repli par moteur (`kw.DB_DEFAULT_URLS`, source de vérité
+    # partagée avec codegen/docker.py::_compose) — utilisée UNIQUEMENT si
+    # NOVA_DATABASE_URL n'est pas fournie à l'exécution (toujours
+    # surchargeable en production, voir parser._validate_app_database).
+    default_url = kw.DB_DEFAULT_URLS.get(engine, kw.DB_DEFAULT_URLS["sqlite"])
+    return _HEADER + f'''
 from __future__ import annotations
 
 import os
@@ -176,9 +275,9 @@ from collections.abc import Iterator
 
 from sqlmodel import Session, SQLModel, create_engine
 
-DATABASE_URL = os.environ.get("NOVA_DATABASE_URL", "sqlite:///./nova.db")
+DATABASE_URL = os.environ.get("NOVA_DATABASE_URL", "{default_url}")
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+connect_args = {{"check_same_thread": False}} if DATABASE_URL.startswith("sqlite") else {{}}
 engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
 
 
@@ -198,12 +297,45 @@ def _generate_router(
     actions: list[str],
     protected_role: str | None = None,
     notify_actions: list[str] | None = None,
+    notify_recipient_field: str | None = None,
+    notify_attachment_field: str | None = None,
+    program: NovaProgram | None = None,
 ) -> str:
     cls = _model_class_name(entity)
     table = _table_name(entity)
     var = to_snake_case(entity.name)
     tag = entity.name
     notify_actions = notify_actions or []
+    recipient_snake = to_snake_case(notify_recipient_field) if notify_recipient_field else None
+    attachment_snake = to_snake_case(notify_attachment_field) if notify_attachment_field else None
+    # `has_many: <Enfant>` (voir `parser._validate_relations`, qui garantit
+    # que chaque relation ici a bien un `belongs_to` réciproque côté
+    # enfant) : `list`/`get` matérialisent les enregistrements liés sous
+    # forme d'un résumé texte par relation plutôt que d'une liste imbriquée
+    # — même choix que pour le calendrier (`events_text`, voir
+    # ui_reflex.py) : Reflex peine à typer un `rx.foreach` sur une valeur
+    # imbriquée dans un dict lui-même dans une liste d'un state var, donc le
+    # frontend affiche directement une chaîne déjà prête plutôt que de
+    # reconstruire une liste côté client.
+    has_many_info = _has_many_relation_info(entity, program) if program is not None else []
+
+    def _notify_kwargs(recipient_expr: str | None, attachment_expr: str | None) -> str:
+        # `destinataire:`/`piece_jointe:` (voir _validate_notifiers) : ajoute
+        # `to=`/`attachment_path=` à l'appel `send_email(...)` déjà construit
+        # par l'appelant. `recipient_expr`/`attachment_expr` sont des
+        # expressions Python (texte) évaluées dans le code généré — soit
+        # `item.<champ>` (create/update), soit une variable locale capturée
+        # avant suppression (delete, voir plus bas : l'objet est expiré après
+        # `session.commit()`).
+        extra = ""
+        if recipient_expr:
+            extra += f", to=({recipient_expr} or None)"
+        if attachment_expr:
+            extra += (
+                f", attachment_path=(UPLOADS_DIR / Path({attachment_expr}).name "
+                f"if {attachment_expr} else None)"
+            )
+        return extra
 
     lines = [
         _HEADER,
@@ -213,14 +345,24 @@ def _generate_router(
         "from sqlmodel import Session, select",
         "",
         "from ..database import get_session",
-        f"from ..models import {cls}, {cls}Create, {cls}Update",
     ]
+    model_imports = [cls, f"{cls}Create", f"{cls}Update"]
+    if has_many_info:
+        model_imports.append(f"{cls}Read")
+        model_imports += [child_cls for child_cls, *_rest in has_many_info]
+    lines.append(f"from ..models import {', '.join(model_imports)}")
     if protected_role:
         lines.append("from ..auth import require_role")
     if notify_actions:
         # `notifier: ...` sur `api {entity.name} { ... }` (nécessite un bloc
         # `email { ... }` — validé à la compilation, voir parser.py).
         lines.append("from ..emailer import send_email")
+    if attachment_snake:
+        # `piece_jointe: {notify_attachment_field}` : le champ est validé
+        # `file`/`image` (parser.py::_validate_notifiers), donc le routeur
+        # `_uploads.py` (UPLOADS_DIR) existe forcément — voir _has_uploads.
+        lines.append("from pathlib import Path")
+        lines.append("from ._uploads import UPLOADS_DIR")
     lines.append("")
     router_kwargs = f'prefix="/{table}", tags=["{tag}"]'
     if protected_role:
@@ -233,28 +375,82 @@ def _generate_router(
         "",
     ]
 
+    def _related_text_lines(indent: str, item_expr: str) -> list[str]:
+        # Une ligne par relation `has_many` : interroge les enregistrements
+        # enfants dont la clé étrangère pointe vers `item_expr`, et résume
+        # leur champ « titre » (`display_attr`) en une seule chaîne jointe
+        # par virgules (chaîne vide si aucun enfant).
+        out = []
+        for child_cls, child_table, fk_col, text_field, display_attr in has_many_info:
+            related_var = f"related_{child_table}"
+            out.append(
+                f"{indent}{related_var} = session.exec("
+                f"select({child_cls}).where({child_cls}.{fk_col} == {item_expr}.id)).all()"
+            )
+            out.append(
+                f'{indent}data["{text_field}"] = ", ".join(str(c.{display_attr}) for c in {related_var})'
+            )
+        return out
+
     if "list" in actions:
-        lines += [
-            f'@router.get("/", response_model=list[{cls}])',
-            f"def list_{table}(session: Session = Depends(get_session)):",
-            f'    """list / liste — retourne tous les {tag}."""',
-            f"    return session.exec(select({cls})).all()",
-            "",
-            "",
-        ]
+        if has_many_info:
+            lines += [
+                f'@router.get("/", response_model=list[{cls}Read])',
+                f"def list_{table}(session: Session = Depends(get_session)):",
+                f'    """list / liste — retourne tous les {tag}, avec un résumé texte '
+                f'des enregistrements liés ({", ".join(t for _c, _t, _f, t, _d in has_many_info)})."""',
+                f"    items = session.exec(select({cls})).all()",
+                "    result = []",
+                "    for item in items:",
+                "        data = item.model_dump()",
+            ]
+            lines += _related_text_lines("        ", "item")
+            lines += [
+                "        result.append(data)",
+                "    return result",
+                "",
+                "",
+            ]
+        else:
+            lines += [
+                f'@router.get("/", response_model=list[{cls}])',
+                f"def list_{table}(session: Session = Depends(get_session)):",
+                f'    """list / liste — retourne tous les {tag}."""',
+                f"    return session.exec(select({cls})).all()",
+                "",
+                "",
+            ]
 
     if "get" in actions:
-        lines += [
-            f'@router.get("/{{item_id}}", response_model={cls})',
-            f"def get_{var}(item_id: int, session: Session = Depends(get_session)):",
-            f'    """get / obtenir / lire — retourne un {tag} par id."""',
-            f"    item = session.get({cls}, item_id)",
-            "    if item is None:",
-            f'        raise HTTPException(status_code=404, detail="{tag} not found")',
-            "    return item",
-            "",
-            "",
-        ]
+        if has_many_info:
+            lines += [
+                f'@router.get("/{{item_id}}", response_model={cls}Read)',
+                f"def get_{var}(item_id: int, session: Session = Depends(get_session)):",
+                f'    """get / obtenir / lire — retourne un {tag} par id, avec un résumé '
+                f'texte des enregistrements liés."""',
+                f"    item = session.get({cls}, item_id)",
+                "    if item is None:",
+                f'        raise HTTPException(status_code=404, detail="{tag} not found")',
+                "    data = item.model_dump()",
+            ]
+            lines += _related_text_lines("    ", "item")
+            lines += [
+                "    return data",
+                "",
+                "",
+            ]
+        else:
+            lines += [
+                f'@router.get("/{{item_id}}", response_model={cls})',
+                f"def get_{var}(item_id: int, session: Session = Depends(get_session)):",
+                f'    """get / obtenir / lire — retourne un {tag} par id."""',
+                f"    item = session.get({cls}, item_id)",
+                "    if item is None:",
+                f'        raise HTTPException(status_code=404, detail="{tag} not found")',
+                "    return item",
+                "",
+                "",
+            ]
 
     if "create" in actions:
         lines += [
@@ -262,14 +458,26 @@ def _generate_router(
             f"def create_{var}(payload: {cls}Create, session: Session = Depends(get_session)):",
             f'    """create / créer — crée un nouveau {tag}."""',
             f"    item = {cls}.model_validate(payload)",
+        ]
+        lines += _validation_check_lines(entity, program) if program is not None else []
+        lines += [
             "    session.add(item)",
             "    session.commit()",
             "    session.refresh(item)",
         ]
         if "create" in notify_actions:
+            notify_kwargs = _notify_kwargs(
+                f"item.{recipient_snake}" if recipient_snake else None,
+                f"item.{attachment_snake}" if attachment_snake else None,
+            )
             lines.append(
-                f'    send_email(subject="[NOVA] Nouveau {tag} / New {tag}", '
-                f'body=f"{tag} #{{item.id}} créé / created.")'
+                f'    send_email(\n'
+                f'        subject="[NOVA] Nouveau {tag} / New {tag}",\n'
+                f'        body=f"{tag} #{{item.id}} créé / created.",\n'
+                f'        html_body=f"""<html><body style="font-family:sans-serif">'
+                f'<h2 style="color:#7c66dc">[NOVA] Nouveau {tag} / New {tag}</h2>'
+                f'<p>{tag} #{{item.id}} créé / created.</p></body></html>"""{notify_kwargs},\n'
+                f'    )'
             )
         lines += [
             "    return item",
@@ -287,14 +495,26 @@ def _generate_router(
             f'        raise HTTPException(status_code=404, detail="{tag} not found")',
             "    for key, value in payload.model_dump(exclude_unset=True).items():",
             "        setattr(item, key, value)",
+        ]
+        lines += _validation_check_lines(entity, program) if program is not None else []
+        lines += [
             "    session.add(item)",
             "    session.commit()",
             "    session.refresh(item)",
         ]
         if "update" in notify_actions:
+            notify_kwargs = _notify_kwargs(
+                f"item.{recipient_snake}" if recipient_snake else None,
+                f"item.{attachment_snake}" if attachment_snake else None,
+            )
             lines.append(
-                f'    send_email(subject="[NOVA] {tag} modifié / updated", '
-                f'body=f"{tag} #{{item.id}} mis à jour / updated.")'
+                f'    send_email(\n'
+                f'        subject="[NOVA] {tag} modifié / updated",\n'
+                f'        body=f"{tag} #{{item.id}} mis à jour / updated.",\n'
+                f'        html_body=f"""<html><body style="font-family:sans-serif">'
+                f'<h2 style="color:#7c66dc">[NOVA] {tag} modifié / updated</h2>'
+                f'<p>{tag} #{{item.id}} mis à jour / updated.</p></body></html>"""{notify_kwargs},\n'
+                f'    )'
             )
         lines += [
             "    return item",
@@ -312,17 +532,31 @@ def _generate_router(
             f'        raise HTTPException(status_code=404, detail="{tag} not found")',
         ]
         if "delete" in notify_actions:
-            # L'id est capturé avant `session.delete`/`commit` : l'objet est
-            # expiré après le commit, `item.id` ne serait plus fiable ensuite.
+            # L'id (et, si configurés, le destinataire/la pièce jointe) sont
+            # capturés avant `session.delete`/`commit` : l'objet est expiré
+            # après le commit, `item.<champ>` ne serait plus fiable ensuite.
             lines.append("    deleted_id = item.id")
+            if recipient_snake:
+                lines.append(f"    deleted_to = item.{recipient_snake}")
+            if attachment_snake:
+                lines.append(f"    deleted_attachment = item.{attachment_snake}")
         lines += [
             "    session.delete(item)",
             "    session.commit()",
         ]
         if "delete" in notify_actions:
+            notify_kwargs = _notify_kwargs(
+                "deleted_to" if recipient_snake else None,
+                "deleted_attachment" if attachment_snake else None,
+            )
             lines.append(
-                f'    send_email(subject="[NOVA] {tag} supprimé / deleted", '
-                f'body=f"{tag} #{{deleted_id}} supprimé / deleted.")'
+                f'    send_email(\n'
+                f'        subject="[NOVA] {tag} supprimé / deleted",\n'
+                f'        body=f"{tag} #{{deleted_id}} supprimé / deleted.",\n'
+                f'        html_body=f"""<html><body style="font-family:sans-serif">'
+                f'<h2 style="color:#7c66dc">[NOVA] {tag} supprimé / deleted</h2>'
+                f'<p>{tag} #{{deleted_id}} supprimé / deleted.</p></body></html>"""{notify_kwargs},\n'
+                f'    )'
             )
         lines += [
             "    return None",
@@ -336,6 +570,7 @@ def _generate_main(program: NovaProgram) -> str:
     app_name = program.app.name if program.app else "NovaApp"
     has_auth = program.auth is not None and program.auth.enabled
     has_queries = bool(program.queries)
+    has_calendars = bool(program.calendars)
     has_uploads = _has_uploads(program)
     lines = [
         _HEADER,
@@ -358,6 +593,8 @@ def _generate_main(program: NovaProgram) -> str:
         lines.append("from .auth import router as auth_router")
     if has_queries:
         lines.append("from .routers._requetes import router as requetes_router")
+    if has_calendars:
+        lines.append("from .routers._ics import router as ics_router")
     if has_uploads:
         lines.append("from .routers._uploads import router as uploads_router, UPLOADS_DIR")
     for api in program.apis:
@@ -393,6 +630,8 @@ def _generate_main(program: NovaProgram) -> str:
         lines.append("app.include_router(auth_router)")
     if has_queries:
         lines.append("app.include_router(requetes_router)")
+    if has_calendars:
+        lines.append("app.include_router(ics_router)")
     if has_uploads:
         lines.append("app.include_router(uploads_router)")
     for api in program.apis:
@@ -475,14 +714,21 @@ class User(SQLModel, table=True):
 
 
 class UserCreate(SQLModel):
+    # Pas de champ `role` ici, volontairement : le rôle n'est JAMAIS choisi
+    # par l'appelant de /auth/register (voir `register()` ci-dessous) —
+    # accepter un `role` dans la charge utile permettrait à n'importe qui
+    # de s'inscrire directement comme "admin".
     email: str
     password: str
-    role: Optional[str] = None
 
 
 class UserRead(SQLModel):
     id: int
     email: str
+    role: str
+
+
+class RoleUpdate(SQLModel):
     role: str
 
 
@@ -542,11 +788,44 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/register", response_model=UserRead, status_code=201)
 def register(payload: UserCreate, session: Session = Depends(get_session)):
+    """Le rôle attribué n'est JAMAIS choisi par l'appelant (voir `UserCreate`
+    ci-dessus, qui ne porte pas de champ `role`) : le tout premier compte
+    créé sur le projet devient automatiquement "admin" (bootstrap sans
+    étape manuelle ni identifiants par défaut à changer) ; tous les
+    suivants reçoivent DEFAULT_ROLE. Un admin peut ensuite promouvoir un
+    autre compte via `PATCH /auth/users/{{id}}/role`. Pensez à créer votre
+    propre compte immédiatement après le déploiement : le premier email
+    enregistré devient administrateur."""
     existing = session.exec(select(User).where(User.email == payload.email)).first()
     if existing is not None:
         raise HTTPException(status_code=400, detail="Email déjà utilisé / Email already registered")
-    role = payload.role if payload.role in ROLES else DEFAULT_ROLE
+    is_first_user = session.exec(select(User)).first() is None
+    role = "admin" if (is_first_user and "admin" in ROLES) else DEFAULT_ROLE
     user = User(email=payload.email, password_hash=hash_password(payload.password), role=role)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+@router.patch("/users/{{user_id}}/role", response_model=UserRead)
+def set_user_role(
+    user_id: int,
+    payload: RoleUpdate,
+    admin: User = Depends(require_role("admin")),
+    session: Session = Depends(get_session),
+):
+    """Promeut/rétrograde un compte existant — réservé aux admins, seul
+    moyen légitime d'attribuer un rôle autre que DEFAULT_ROLE une fois le
+    premier compte admin bootstrap via `register()` ci-dessus."""
+    if payload.role not in ROLES:
+        raise HTTPException(
+            status_code=422, detail=f"Rôle inconnu / Unknown role: {{payload.role}}"
+        )
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable / User not found")
+    user.role = payload.role
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -577,11 +856,23 @@ def _format_query_value(value) -> str:
 
 
 def _generate_query_router(program: NovaProgram) -> str:
+    # `filtre:` de premier niveau -> combinés par ET (autant d'appels
+    # `.where()` chaînés, comportement historique inchangé). Un bloc
+    # `ou: { filtre: ... filtre: ... }` (Query.filter_groups) -> un seul
+    # `.where(or_(...))` par groupe, donc lui aussi ET-é avec le reste :
+    # `WHERE f1 AND f2 AND (g1a OR g1b) AND (g2a OR g2b OR g2c)`. L'import
+    # `or_` n'est ajouté que si au moins une requête du programme a un
+    # groupe `ou:`, pour ne pas polluer le fichier généré sinon.
+    has_or_groups = any(q.filter_groups for q in program.queries)
     lines = [
         _HEADER,
         "from __future__ import annotations",
         "",
         "from fastapi import APIRouter, Depends",
+    ]
+    if has_or_groups:
+        lines.append("from sqlalchemy import or_")
+    lines += [
         "from sqlmodel import Session, select",
         "",
         "from ..database import get_session",
@@ -605,6 +896,12 @@ def _generate_query_router(program: NovaProgram) -> str:
         for f in q.filters:
             snake = to_snake_case(f.field)
             lines.append(f"    query = query.where(models.{cls}.{snake} {f.op} {_format_query_value(f.value)})")
+        for group in q.filter_groups:
+            or_terms = ", ".join(
+                f"models.{cls}.{to_snake_case(f.field)} {f.op} {_format_query_value(f.value)}"
+                for f in group.filters
+            )
+            lines.append(f"    query = query.where(or_({or_terms}))")
         if q.order_by:
             snake = to_snake_case(q.order_by)
             direction = "desc" if q.order_dir == "desc" else "asc"
@@ -634,11 +931,25 @@ def _generate_emailer(program: NovaProgram) -> str:
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
+import re
 import smtplib
 from email.message import EmailMessage
+from pathlib import Path
 
 logger = logging.getLogger("nova.email")
+
+
+def _split_recipients(value: str) -> list[str]:
+    """Découpe une chaîne de destinataires « comme sur les mails standard » :
+    plusieurs adresses séparées par `;` (usage courant des clients mail) ou
+    `,` (séparateur RFC 5322 du header `To`), espaces superflus tolérés,
+    entrées vides ignorées. Utilisée aussi bien pour le destinataire fixe
+    (NOVA_SMTP_TO / `email {{ to: ... }}`) que pour un champ dynamique
+    (`api {{ ... destinataire: <champ> }}`, voir _generate_router) — les
+    deux sources sont de simples chaînes .nova, jamais des listes."""
+    return [addr.strip() for addr in re.split(r"[;,]", value) if addr.strip()]
 
 # Bloc `email {{ ... }}` du fichier .nova : valeurs par défaut ci-dessous,
 # surchargeables sans recompiler via NOVA_SMTP_HOST / NOVA_SMTP_PORT /
@@ -656,22 +967,61 @@ SMTP_TO = os.environ.get("NOVA_SMTP_TO", "{email.to_addr}")
 SMTP_TLS = os.environ.get("NOVA_SMTP_TLS", "{tls_default}").strip().lower() not in ("0", "false", "non", "no")
 
 
-def send_email(subject: str, body: str, to: str | None = None) -> None:
-    """Envoie un email texte simple — notification déclenchée par
-    `notifier:` sur un bloc `api` (voir app/routers/<entite>.py). Toute
-    erreur (serveur SMTP injoignable, identifiants invalides...) est
+def send_email(
+    subject: str,
+    body: str,
+    to: str | list[str] | None = None,
+    html_body: str | None = None,
+    attachment_path: str | Path | None = None,
+) -> None:
+    """Envoie une notification — déclenchée par `notifier:` sur un bloc
+    `api` (voir app/routers/<entite>.py). Toute erreur (serveur SMTP
+    injoignable, identifiants invalides, pièce jointe introuvable...) est
     loggée en warning et n'interrompt JAMAIS l'appelant : une notification
     est un effet de bord, pas une garantie — un souci SMTP ne doit jamais
-    faire échouer une création/modification/suppression d'enregistrement."""
-    recipient = to or SMTP_TO
-    if not recipient:
+    faire échouer une création/modification/suppression d'enregistrement.
+
+    `to` : surcharge le destinataire fixe (SMTP_TO) — utilisé quand `api
+    {{ ... destinataire: <champ> }}` référence un champ de l'enregistrement
+    concerné (voir _generate_router). Plusieurs destinataires : comme sur
+    les mails standard, une seule chaîne peut contenir plusieurs adresses
+    séparées par `;` (ou `,`) — ex. `destinataire: contacts` avec un champ
+    `contacts` valant `"a@x.com; b@y.com"` — découpée par
+    `_split_recipients` ; `to` accepte aussi directement une liste de
+    chaînes (chacune éventuellement elle-même multi-adresses). `html_body` :
+    version HTML du message, envoyée en plus de `body` (texte brut, toujours
+    présent en repli pour les clients mail qui n'affichent pas le HTML) via
+    multipart/alternative. `attachment_path` : chemin d'un fichier local
+    (voir `api {{ ... piece_jointe: <champ> }}`) à joindre — silencieusement
+    ignoré s'il est None ou si le fichier n'existe pas (ex. champ vide sur
+    l'enregistrement, ou fichier supprimé depuis) plutôt que de faire
+    échouer l'envoi."""
+    if to is None:
+        recipients = _split_recipients(SMTP_TO)
+    elif isinstance(to, str):
+        recipients = _split_recipients(to)
+    else:
+        recipients = [addr for value in to for addr in _split_recipients(value)]
+    if not recipients:
         logger.warning("NOVA email: aucun destinataire configuré (NOVA_SMTP_TO), notification ignorée.")
         return
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = SMTP_FROM or SMTP_USER or "noreply@nova.local"
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg.set_content(body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+    if attachment_path:
+        path = Path(attachment_path)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            logger.warning("NOVA email: pièce jointe '%s' illisible (%s) — envoyée sans pièce jointe.", path, exc)
+        else:
+            mime_type, _ = mimetypes.guess_type(path.name)
+            maintype, _, subtype = (mime_type or "application/octet-stream").partition("/")
+            msg.add_attachment(data, maintype=maintype, subtype=subtype or "octet-stream", filename=path.name)
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
             if SMTP_TLS:
@@ -696,20 +1046,82 @@ def _has_uploads(program: NovaProgram) -> bool:
 _UPLOADS_ROUTER_TEMPLATE = _HEADER + '''\
 from __future__ import annotations
 
+import io
 import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
-# Dossier de stockage des fichiers envoyés via un champ `file`/`fichier` ou
-# `image` du DSL. Chemin surchargeable via NOVA_UPLOADS_DIR (relatif au
-# répertoire de travail du conteneur backend — déjà persistant via le volume
-# Docker `backend_data:/app`, voir codegen/docker.py, comme la base SQLite).
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - Pillow est toujours dans
+    # requirements.txt dès qu'un champ file/image existe (voir generate_backend
+    # ci-dessous) ; ce filet de sécurité évite seulement de planter à l'import
+    # si l'environnement d'exécution s'écarte du requirements.txt généré.
+    Image = None
+
+# Toute cette configuration est surchargeable sans recompiler, via variable
+# d'environnement (même principe que NOVA_JWT_SECRET/NOVA_SMTP_PASSWORD) :
+# aucune limite de taille/type n'était appliquée par défaut avant cette
+# fonctionnalité (limitation documentée du MVP) — ces valeurs par défaut
+# sont volontairement permissives plutôt que de casser un projet existant.
 UPLOADS_DIR = Path(os.environ.get("NOVA_UPLOADS_DIR", "uploads"))
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Taille max par fichier, en octets (défaut 10 Mo).
+MAX_UPLOAD_BYTES = int(os.environ.get("NOVA_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
+
+# Extensions autorisées (liste séparée par des virgules, insensible à la
+# casse) — un sous-ensemble raisonnable par défaut (images + documents
+# bureautiques courants + archives), pas une liste blanche exhaustive :
+# à étendre via NOVA_UPLOAD_ALLOWED_EXTENSIONS si besoin (ex. vidéos).
+_DEFAULT_ALLOWED_EXTENSIONS = (
+    ".jpg,.jpeg,.png,.gif,.webp,.svg,.bmp,"
+    ".pdf,.txt,.csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip"
+)
+ALLOWED_EXTENSIONS = {
+    ext.strip().lower()
+    for ext in os.environ.get("NOVA_UPLOAD_ALLOWED_EXTENSIONS", _DEFAULT_ALLOWED_EXTENSIONS).split(",")
+    if ext.strip()
+}
+
+# Dimension max (largeur ou hauteur, en pixels) pour un fichier reconnu comme
+# une image : au-delà, redimensionné (aspect ratio conservé) avant d'être
+# écrit sur disque — évite qu'une photo directement sortie d'un appareil
+# photo/smartphone (plusieurs dizaines de Mpx) alourdisse inutilement le
+# stockage et le temps de chargement des vignettes générées (voir
+# codegen/ui_reflex.py::_field_value_src, rendu `rx.image` en table/carte).
+MAX_IMAGE_DIMENSION = int(os.environ.get("NOVA_UPLOAD_MAX_IMAGE_DIMENSION", "2000"))
+
 router = APIRouter(prefix="/uploads", tags=["uploads"])
+
+
+def _resize_if_oversized_image(content: bytes, suffix: str) -> bytes:
+    """Si `content` est une image (ouverte avec succès par Pillow) dont une
+    dimension dépasse MAX_IMAGE_DIMENSION, la redimensionne (thumbnail,
+    aspect ratio conservé) et la ré-encode dans son format d'origine. Toute
+    autre valeur de `content` (pas une image, ou Pillow absent) est
+    retournée inchangée — la détection se fait sur le CONTENU réel, pas sur
+    l'extension déclarée du fichier ni sur le type de champ NOVA d'origine,
+    puisque ce routeur est partagé par tous les champs `file`/`image` du
+    projet."""
+    if Image is None:
+        return content
+    try:
+        img = Image.open(io.BytesIO(content))
+        img.load()  # force la lecture complète : détecte aussi un fichier corrompu
+    except Exception:
+        return content  # pas une image valide (ou format non supporté par Pillow)
+    if img.width <= MAX_IMAGE_DIMENSION and img.height <= MAX_IMAGE_DIMENSION:
+        return content
+    img.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION))
+    out = io.BytesIO()
+    fmt = img.format or "PNG"
+    if fmt == "JPEG" and img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")  # JPEG ne supporte pas la transparence
+    img.save(out, format=fmt)
+    return out.getvalue()
 
 
 @router.post("/")
@@ -718,14 +1130,155 @@ async def upload_file(file: UploadFile = File(...)):
     par le montage `StaticFiles` de app/main.py) — à stocker telle quelle
     dans le champ `file`/`image` de l'entité concernée. Le formulaire Reflex
     généré fait cet appel automatiquement dès qu'un fichier est sélectionné,
-    avant de soumettre le reste du formulaire (voir codegen/ui_reflex.py)."""
-    suffix = Path(file.filename or "").suffix
+    avant de soumettre le reste du formulaire (voir codegen/ui_reflex.py).
+
+    Rejette (415) une extension absente de ALLOWED_EXTENSIONS et (413) un
+    fichier dépassant MAX_UPLOAD_BYTES ; redimensionne automatiquement une
+    image dépassant MAX_IMAGE_DIMENSION avant de l'écrire sur disque."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if ALLOWED_EXTENSIONS and suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"Type de fichier non autorisé / Unsupported file type: '{suffix}'. "
+                f"Autorisés / Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            ),
+        )
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Fichier trop volumineux / File too large: {len(content)} octets/bytes "
+                f"(max {MAX_UPLOAD_BYTES})."
+            ),
+        )
+    content = _resize_if_oversized_image(content, suffix)
     stored_name = f"{uuid.uuid4().hex}{suffix}"
     dest = UPLOADS_DIR / stored_name
-    content = await file.read()
     dest.write_bytes(content)
     return {"url": f"/files/{stored_name}"}
 '''
+
+
+def _calendar_ics_slug(cal) -> str:
+    """Même slug que `codegen/ui_reflex.py::_calendar_ics_slug` (dupliqué
+    plutôt que partagé entre les deux modules de codegen, comme le reste des
+    fonctions de nommage de ce fichier — voir `_table_name`/`to_snake_case`
+    utilisées indépendamment de leur pendant côté frontend)."""
+    return to_snake_case(to_ascii_identifier(cal.name)).replace("_", "-")
+
+
+_ICS_ESCAPE_HELPER = r'''
+def _ics_escape(text: str) -> str:
+    """Échappe les caractères spéciaux d'un champ texte iCalendar (SUMMARY...)
+    — RFC 5545 section 3.3.11 : antislash, point-virgule, virgule et retour
+    à la ligne doivent être précédés d'un antislash dans la valeur encodée."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
+'''
+
+
+def _generate_calendar_ics_router(program: NovaProgram) -> str:
+    """`backend/app/routers/_ics.py` — généré uniquement si au moins un bloc
+    `calendar { ... }` est présent (voir `generate_backend`). Une route GET
+    par calendrier (`/ics/<slug>.ics`) exportant les enregistrements de
+    l'entité source au format iCalendar (RFC 5545) — sans nouvelle
+    dépendance : le format est assez simple pour être produit par de
+    simples f-strings (voir `_ics_escape` ci-dessus), pas besoin d'ajouter
+    une bibliothèque au requirements.txt généré pour ça. Compatible avec un
+    import ou un abonnement URL direct dans Google Calendar/Outlook/Apple
+    Calendar. Chaque route hérite de la même protection par rôle que l'API
+    de l'entité source (`api <Entite> { proteger: <role> }`), même logique
+    que `codegen/ui_reflex.py::_chart_data_source`/`_calendar_data_source`
+    pour la page Reflex correspondante — un calendrier protégé ne doit pas
+    exposer un export non protégé de la même donnée."""
+    lines = [
+        _HEADER,
+        "from __future__ import annotations",
+        "",
+        "from datetime import datetime, timezone",
+        "",
+        "from fastapi import APIRouter, Depends, Response",
+        "from sqlmodel import Session, select",
+        "",
+        "from ..database import get_session",
+        "from .. import models",
+    ]
+    cal_roles: dict[str, str | None] = {}
+    for cal in program.calendars:
+        api = next((a for a in program.apis if a.entity == cal.entity), None)
+        cal_roles[cal.name] = api.protected_role if api else None
+    if any(cal_roles.values()):
+        lines.append("from ..auth import require_role")
+    lines.append(_ICS_ESCAPE_HELPER)
+    lines += [
+        'router = APIRouter(prefix="/ics", tags=["calendriers"])',
+        "",
+        "",
+    ]
+    for cal in program.calendars:
+        entity = program.get_entity(cal.entity)
+        if entity is None:
+            continue
+        cls = _model_class_name(entity)
+        slug = _calendar_ics_slug(cal)
+        fn_name = to_snake_case(cal.name)
+        date_field_snake = to_snake_case(cal.date_field)
+        title_field_snake = to_snake_case(cal.title_field) if cal.title_field else None
+        date_field_obj = next((f for f in entity.fields if f.name == cal.date_field), None)
+        is_datetime = bool(date_field_obj and date_field_obj.type == "datetime")
+        role = cal_roles.get(cal.name)
+        route_decorator = f'@router.get("/{slug}.ics"'
+        if role:
+            route_decorator += f', dependencies=[Depends(require_role("{role}"))]'
+        route_decorator += ")"
+        title_default = repr(cal.entity)
+        title_expr = (
+            f'_ics_escape(str(getattr(item, "{title_field_snake}", "") or {title_default}))'
+            if title_field_snake
+            else f"_ics_escape({title_default})"
+        )
+        dtstart_expr = (
+            "raw_date.strftime('%Y%m%dT%H%M%SZ')"
+            if is_datetime
+            else "raw_date.strftime('%Y%m%d')"
+        )
+        dtstart_prefix = "DTSTART" if is_datetime else "DTSTART;VALUE=DATE"
+        lines += [
+            route_decorator,
+            f"def {fn_name}_ics(session: Session = Depends(get_session)):",
+            f'    """Export iCalendar (.ics) du calendrier `{cal.name}` (source : {cal.entity}).',
+            f'    Un événement par enregistrement dont `{cal.date_field}` n\'est pas vide."""',
+            f"    items = session.exec(select(models.{cls})).all()",
+            '    now_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")',
+            "    ics_lines = [",
+            '        "BEGIN:VCALENDAR",',
+            '        "VERSION:2.0",',
+            f'        "PRODID:-//NOVA//{cal.name}//FR",',
+            '        "CALSCALE:GREGORIAN",',
+            "    ]",
+            "    for item in items:",
+            f'        raw_date = getattr(item, "{date_field_snake}", None)',
+            "        if raw_date is None:",
+            "            continue",
+            f"        summary = {title_expr}",
+            '        ics_lines.append("BEGIN:VEVENT")',
+            f'        ics_lines.append(f"UID:{to_snake_case(cal.entity)}-{{item.id}}@nova.local")',
+            '        ics_lines.append(f"DTSTAMP:{now_stamp}")',
+            f'        ics_lines.append(f"{dtstart_prefix}:{{{dtstart_expr}}}")',
+            '        ics_lines.append(f"SUMMARY:{summary}")',
+            '        ics_lines.append("END:VEVENT")',
+            "    ics_lines.append(\"END:VCALENDAR\")",
+            '    return Response(content="\\r\\n".join(ics_lines), media_type="text/calendar")',
+            "",
+            "",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def generate_backend(program: NovaProgram) -> dict[str, str]:
@@ -733,8 +1286,11 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
     has_queries = bool(program.queries)
     has_uploads = _has_uploads(program)
     has_email = program.email is not None
+    db_engine = program.database_engine()
 
     requirements = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "sqlmodel>=0.0.16"]
+    if db_engine in kw.DB_DRIVER_REQUIREMENTS:
+        requirements.append(kw.DB_DRIVER_REQUIREMENTS[db_engine])
     if has_auth:
         requirements += ["bcrypt>=4.0", "python-jose[cryptography]>=3.3", "python-multipart>=0.0.9"]
     elif has_uploads:
@@ -743,11 +1299,15 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
         # (formulaire OAuth2), mais un projet sans `auth` avec un champ
         # `file`/`image` en a besoin tout autant.
         requirements.append("python-multipart>=0.0.9")
+    if has_uploads:
+        # Pillow : redimensionnement automatique des images dépassant
+        # NOVA_UPLOAD_MAX_IMAGE_DIMENSION (voir _UPLOADS_ROUTER_TEMPLATE).
+        requirements.append("Pillow>=10.0")
 
     files: dict[str, str] = {
         "backend/app/__init__.py": "",
         "backend/app/models.py": _generate_models(program),
-        "backend/app/database.py": _generate_database(),
+        "backend/app/database.py": _generate_database(db_engine),
         "backend/app/routers/__init__.py": "",
         "backend/app/main.py": _generate_main(program),
         "backend/requirements.txt": "\n".join(requirements) + "\n",
@@ -756,6 +1316,8 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
         files["backend/app/auth.py"] = _generate_auth(program)
     if has_queries:
         files["backend/app/routers/_requetes.py"] = _generate_query_router(program)
+    if program.calendars:
+        files["backend/app/routers/_ics.py"] = _generate_calendar_ics_router(program)
     if has_uploads:
         files["backend/app/routers/_uploads.py"] = _UPLOADS_ROUTER_TEMPLATE
     if has_email:
@@ -766,7 +1328,13 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
             continue
         table = _table_name(entity)
         files[f"backend/app/routers/{table}.py"] = _generate_router(
-            entity, api.actions, api.protected_role, api.notify_actions
+            entity,
+            api.actions,
+            api.protected_role,
+            api.notify_actions,
+            api.notify_recipient_field,
+            api.notify_attachment_field,
+            program,
         )
     return files
 

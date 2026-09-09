@@ -17,11 +17,21 @@ statement: app_decl
          | email_decl
          | calendar_decl
          | translations_decl
+         | validation_decl
 
 // ---------------------------------------------------------------- app -----
 // Optional single block describing the application itself.
-app_decl: APP_KW NAME "{" app_prop* "}"
+app_decl: APP_KW NAME "{" app_member* "}"
+app_member: app_prop
+          | languages_prop
 app_prop: PROP_NAME ":" value
+// `langues: fr, en` : liste de codes de langue séparés par des virgules,
+// restreignant les langues actives du projet (voir ast_nodes.App.languages)
+// — non-terminal dédié plutôt que le `value` générique de `app_prop` (même
+// raison que `chart_value`/`query_prop.or_filter` : `value` ne supporte pas
+// une liste, et le réutiliser tel quel casserait le lexer contextuel
+// ailleurs, comme documenté sur `chart_prop` plus bas).
+languages_prop: LANGUES_KW ":" NAME ("," NAME)*
 
 // ------------------------------------------------------------- entity -----
 entity_decl: ENTITY_KW NAME "{" entity_member* "}"
@@ -52,6 +62,8 @@ api_decl: API_KW NAME "{" api_member* "}"
 api_member: api_action
           | protect_stmt
           | notify_stmt
+          | notify_recipient_stmt
+          | notify_attachment_stmt
 api_action: LIST_KW | CREATE_KW | UPDATE_KW | DELETE_KW | GET_KW
 protect_stmt: PROTECT_KW ":" NAME
 // `notifier: creer, supprimer` (alias `notify: create, delete`...) : envoie
@@ -61,6 +73,17 @@ protect_stmt: PROTECT_KW ":" NAME
 // lecture (list/get) n'a pas de sens.
 notify_stmt: NOTIFIER_KW ":" notify_action ("," notify_action)*
 notify_action: CREATE_KW | UPDATE_KW | DELETE_KW
+// `destinataire: <champ>` (alias `recipient:`...) : au lieu du destinataire
+// fixe du bloc `email { destinataire: ... }`/NOVA_SMTP_TO, envoie à
+// l'adresse contenue dans ce champ de l'ENREGISTREMENT concerné (ex. un
+// champ `email: chaine` sur l'entité) — résolu/validé au moment de la
+// génération (le champ doit exister sur l'entité, voir
+// parser.py::_validate_notifiers), pas ici.
+notify_recipient_stmt: DESTINATAIRE_KW ":" NAME
+// `piece_jointe: <champ>` (alias `attachment:`...) : joint le fichier
+// référencé par ce champ `file`/`image` de l'enregistrement à la
+// notification — même résolution/validation que `notify_recipient_stmt`.
+notify_attachment_stmt: PIECE_JOINTE_KW ":" NAME
 
 // --------------------------------------------------------------- page -----
 page_decl: PAGE_KW NAME "{" page_stmt* "}"
@@ -85,13 +108,34 @@ name_list: NAME ("," NAME)*
 // -------------------------------------------------------------- query -----
 // Requête déclarative au-delà du CRUD simple : filtre/tri/limite sur une
 // entité, compilée en une route API dédiée (pas de SQL à écrire pour les
-// cas courants).
+// cas courants). Plusieurs `filtre:` au premier niveau sont combinés par ET
+// (comportement historique, inchangé) ; un bloc `ou: { filtre: ... filtre:
+// ... }` regroupe des filtres combinés par OU entre eux, le groupe entier
+// étant lui-même combiné par ET avec le reste (plusieurs blocs `ou:`
+// possibles, chacun un groupe ET-é séparément) — voir _generate_query_router
+// dans codegen/api_fastapi.py pour la traduction SQLAlchemy
+// (`and_(*filtres, or_(*groupe1), or_(*groupe2), ...)`).
 query_decl: QUERY_KW NAME SUR_KW NAME "{" query_prop* "}"
 query_prop: FILTRE_KW ":" NAME COMPARATOR value
+          | OU_KW ":" "{" or_filter+ "}"
           | TRIER_KW ":" NAME (ASC_KW | DESC_KW)?
           | LIMITE_KW ":" NUMBER
+or_filter: FILTRE_KW ":" NAME COMPARATOR value
 
 value: STRING | NUMBER | BOOL_TRUE | BOOL_FALSE | NAME
+
+// --------------------------------------------------------- validation -----
+// Validation croisant plusieurs champs d'une même entité (au-delà des
+// contraintes portées par un `modifier` sur UN SEUL `field_decl` —
+// requis/unique/motif/default) : une ou plusieurs règles comparant deux
+// champs entre eux, chacune avec son propre message d'erreur, appliquées à
+// la création ET à la modification (voir
+// codegen/api_fastapi.py::_validation_check_lines). `regle`/`message` sont
+// couplés dans UNE SEULE règle plutôt que déclarés séparément : sans ça,
+// plusieurs `regle:`/`message:` dans le même bloc ne permettraient pas de
+// savoir quel message va avec quelle règle.
+validation_decl: VALIDATION_KW NAME SUR_KW NAME "{" validation_rule+ "}"
+validation_rule: REGLE_KW ":" NAME COMPARATOR NAME MESSAGE_KW ":" STRING
 
 // -------------------------------------------------------------- chart -----
 // Graphique déclaratif : `sur <NAME>` référence soit une entité (les
@@ -108,7 +152,12 @@ value: STRING | NUMBER | BOOL_TRUE | BOOL_FALSE | NAME
 // développement de ce bloc `chart`.
 chart_decl: CHART_KW NAME SUR_KW NAME "{" chart_prop* "}"
 chart_prop: NAME ":" chart_value
-chart_value: STRING | NAME
+// `axe_y`/`y` accepte une liste de NAME séparés par des virgules pour les
+// graphiques multi-séries (`axe_y: ventes, couts`) ; les autres propriétés
+// (`type`, `axe_x`, `titre`) n'utilisent jamais qu'un seul token, mais
+// partagent ce même non-terminal — aucune ambiguïté, la liste à un seul
+// élément est simplement le cas usuel.
+chart_value: STRING | NAME ("," NAME)*
 
 // -------------------------------------------------------------- email -----
 // Bloc optionnel unique : configuration SMTP pour les notifications
@@ -172,6 +221,8 @@ DELETE_KW: "delete" | "supprimer" | "eliminar" | "borrar" | "loeschen" | "lösch
 GET_KW: "get" | "obtenir" | "lire" | "obtener" | "erhalten" | "holen" | "ottenere" | "obter"
 PROTECT_KW: "proteger" | "protect" | "protéger" | "proteggere" | "schuetzen" | "schützen"
 NOTIFIER_KW: "notifier" | "notify" | "notificar" | "benachrichtigen" | "notificare"
+DESTINATAIRE_KW: "destinataire" | "recipient" | "destinatario" | "empfaenger" | "empfänger"
+PIECE_JOINTE_KW: "piece_jointe" | "pièce_jointe" | "attachment" | "adjunto" | "allegato" | "anexo" | "anhang"
 
 PAGE_KW: "page" | "pagina" | "página" | "seite"
 SHOW_KW: "show" | "afficher" | "mostrar" | "zeigen" | "anzeigen" | "mostrare" | "exibir"
@@ -197,11 +248,16 @@ TRANSLATIONS_KW: "translations" | "traductions" | "traducciones" | "übersetzung
 QUERY_KW: "requete" | "requête" | "query" | "consulta" | "abfrage" | "interrogazione"
 SUR_KW: "sur" | "on" | "from" | "en" | "von" | "su" | "em"
 FILTRE_KW: "filtre" | "filter" | "filtro"
+OU_KW: "ou" | "or" | "oder" | "o"
 TRIER_KW: "trier_par" | "sort_by" | "order_by" | "ordenar_por" | "sortieren_nach" | "ordina_per"
 ASC_KW: "asc" | "croissant" | "ascendente" | "aufsteigend" | "crescente"
 DESC_KW: "desc" | "décroissant" | "decroissant" | "descendente" | "absteigend" | "decrescente"
 LIMITE_KW: "limite" | "limit" | "límite"
 COMPARATOR: ">=" | "<=" | "==" | "!=" | ">" | "<"
+
+VALIDATION_KW: "validation" | "validación" | "validierung" | "convalida" | "validazione" | "validação"
+REGLE_KW: "regle" | "règle" | "rule" | "regla" | "regel" | "regola" | "regra"
+MESSAGE_KW: "message" | "mensaje" | "nachricht" | "messaggio" | "mensagem"
 
 TYPE_STRING: "string" | "chaine" | "chaîne" | "cadena" | "zeichenkette" | "stringa" | "cadeia"
 TYPE_TEXT: "text" | "texte" | "texto" | "testo"
@@ -221,6 +277,14 @@ PROP_NAME: "name" | "nom" | "description" | "lang" | "langue" | "version"
          | "nombre" | "nome" | "descripcion" | "descripción" | "beschreibung" | "descrizione"
          | "descricao" | "descrição" | "idioma" | "lingua" | "sprache"
          | "css" | "feuille_style" | "stylesheet"
+         | "database" | "base_donnees" | "base_données" | "base_datos" | "datenbank" | "banco_dados"
+
+// Priorité explicite (> défaut 0) : sans elle, le lexer peut matcher le
+// préfixe "langue" de PROP_NAME (ci-dessus) avant "langues" en entier,
+// laissant un "s" résiduel non reconnu — bug réel rencontré en écrivant
+// cette règle (voir aussi le commentaire sur `chart_value`/LALL plus haut
+// pour la même famille de piège lexer).
+LANGUES_KW.2: "langues" | "languages" | "idiomas" | "sprachen" | "lingue"
 
 NAME: /[^\W\d]\w*/
 STRING: /"[^"]*"/
