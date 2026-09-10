@@ -10,6 +10,7 @@ from lark import Lark, Transformer, v_args
 from lark.exceptions import LarkError
 
 from . import keywords as kw
+from .codegen.utils import to_snake_case as _to_snake_case
 from .ast_nodes import (
     Api,
     App,
@@ -25,8 +26,10 @@ from .ast_nodes import (
     Query,
     QueryFilter,
     QueryFilterGroup,
+    QueryJoin,
     Relation,
     Validation,
+    ValidationExpr,
     ValidationRule,
 )
 
@@ -242,17 +245,38 @@ class _NovaTransformer(Transformer):
         return auth
 
     # ---- query ---------------------------------------------------------------
+    def qualified_name(self, *toks):
+        # `Client.pays` (qualifié — champ d'une entité jointe) ou `pays`
+        # (non qualifié — champ de l'entité principale) : voir grammar/
+        # nova.lark. Toujours réduit à une simple chaîne, le "." étant
+        # préservé pour que codegen/api_fastapi.py puisse distinguer les
+        # deux formes (`"." in field`).
+        return ".".join(str(t) for t in toks)
+
     def or_filter(self, kw_tok, field_tok, comparator_tok, val):
         # Même corps que la branche FILTRE_KW de `query_prop` ci-dessous,
         # mais dans le non-terminal dédié `or_filter` (voir grammar/nova.lark
         # sur `query_decl`) : un `filtre:` à l'intérieur d'un bloc `ou: { }`.
         return QueryFilter(field=str(field_tok), op=str(comparator_tok), value=val)
 
+    def jointure_stmt(self, _kw_tok, entity_tok, _sur_tok, local_tok, remote_tok):
+        # `jointure: <Entite> sur <local> = <distant>` — voir
+        # ast_nodes.QueryJoin. `local_tok`/`remote_tok` sont déjà des
+        # chaînes (retournées par `qualified_name` ci-dessus), pas des
+        # Token Lark bruts.
+        return QueryJoin(entity=str(entity_tok), local_field=str(local_tok), remote_field=str(remote_tok))
+
     def query_prop(self, kw_tok, *rest):
         # Même principe que `auth_prop` ci-dessus : comparer `kw_tok.type`
         # (FILTRE_KW / OU_KW / TRIER_KW / LIMITE_KW) et non le texte du
         # token, qui varie selon la langue source (`filtro`, `ordina_per`,
-        # `límite`, `oder`...).
+        # `límite`, `oder`...). `jointure_stmt` est la seule branche de
+        # query_prop qui n'est pas introduite par un mot-clé direct : `rest`
+        # y contient déjà l'objet QueryJoin construit par `jointure_stmt`
+        # ci-dessus (Lark ne passe pas de kw_tok distinct pour une
+        # alternative qui est elle-même un non-terminal nommé).
+        if isinstance(kw_tok, QueryJoin):
+            return ("join", kw_tok)
         if kw_tok.type == "FILTRE_KW":
             field_tok, comparator_tok, val = rest
             return ("filter", QueryFilter(field=str(field_tok), op=str(comparator_tok), value=val))
@@ -281,6 +305,8 @@ class _NovaTransformer(Transformer):
                 q.order_by, q.order_dir = val
             elif key == "limit":
                 q.limit = val
+            elif key == "join":
+                q.joins.append(val)
         return q
 
     # ---- chart -----------------------------------------------------------
@@ -306,6 +332,8 @@ class _NovaTransformer(Transformer):
         key = kw.CHART_PROP_ALIASES.get(str(key_tok), str(key_tok))
         if key == "type" and isinstance(value, str):
             value = kw.CHART_TYPES.get(value, value)
+        elif key == "aggregation" and isinstance(value, str):
+            value = kw.CHART_AGGREGATIONS.get(value, value)
         return (key, value)
 
     def chart_decl(self, _kw_tok, name_tok, _sur_tok, source_tok, *props):
@@ -324,6 +352,8 @@ class _NovaTransformer(Transformer):
                     chart.y_fields = [str(val)]
             elif key == "title":
                 chart.title = str(val)
+            elif key == "aggregation":
+                chart.aggregation = str(val)
         return chart
 
     # ---- email -------------------------------------------------------------
@@ -362,6 +392,8 @@ class _NovaTransformer(Transformer):
                 email.to_addr = str(val)
             elif key == "tls":
                 email.tls = bool(val) if isinstance(val, bool) else str(val) not in ("0", "false", "non", "no")
+            elif key == "template":
+                email.template = str(val)
         return email
 
     # ---- calendar ----------------------------------------------------------
@@ -387,11 +419,41 @@ class _NovaTransformer(Transformer):
         return cal
 
     # ---- validation ----------------------------------------------------------
-    def validation_rule(self, _regle_tok, field_a_tok, comparator_tok, field_b_tok, _message_tok, message_str):
+    def validation_term(self, *toks):
+        # `NAME "(" validation_expr ("," validation_expr)* ")"` (appel de
+        # fonction whitelist, voir kw.VALIDATION_FUNCTIONS) si plus d'un
+        # enfant ; sinon un unique NUMBER ou NAME — même technique que
+        # `value()` en tête de ce Transformer pour distinguer les deux :
+        # tenter la conversion numérique, retomber sur un champ nu si elle
+        # échoue (pas besoin de comparer le type du token, NUMBER/NAME sont
+        # ici les deux seules alternatives à un seul enfant).
+        if len(toks) == 1:
+            text = str(toks[0])
+            try:
+                return ValidationExpr(kind="number", value=float(text) if "." in text else int(text))
+            except ValueError:
+                return ValidationExpr(kind="field", value=text)
+        name_tok, *args = toks
+        canonical = kw.VALIDATION_FUNCTIONS.get(str(name_tok), str(name_tok))
+        return ValidationExpr(kind="call", value=canonical, args=list(args))
+
+    def validation_expr(self, *toks):
+        # `validation_term (("+"|"-") validation_term)*` : replié en une
+        # chaîne de ValidationExpr(kind="binop", ...) associée à gauche
+        # (`a + b - c` -> `(a + b) - c`), comme l'arithmétique usuelle.
+        expr = toks[0]
+        i = 1
+        while i < len(toks):
+            op_tok, rhs = toks[i], toks[i + 1]
+            expr = ValidationExpr(kind="binop", value=str(op_tok), args=[expr, rhs])
+            i += 2
+        return expr
+
+    def validation_rule(self, _regle_tok, expr_a, comparator_tok, expr_b, _message_tok, message_str):
         return ValidationRule(
-            field_a=str(field_a_tok),
+            expr_a=expr_a,
             op=str(comparator_tok),
-            field_b=str(field_b_tok),
+            expr_b=expr_b,
             message=kw.strip_quotes(str(message_str)),
         )
 
@@ -465,6 +527,7 @@ def parse_source(source: str) -> NovaProgram:
     _validate_charts(program)
     _validate_notifiers(program)
     _validate_calendars(program)
+    _validate_query_joins(program)
     _validate_multilingual_fields(program)
     _validate_app_languages(program)
     _validate_app_database(program)
@@ -503,6 +566,24 @@ def _validate_charts(program: NovaProgram) -> None:
                 f"les types {sorted(kw.CHART_MULTI_SERIES_TYPES)} — "
                 f"le type '{chart.type}' n'accepte qu'un seul champ."
             )
+        if chart.aggregation is not None:
+            if chart.aggregation not in kw.CHART_AGGREGATION_CANONICAL:
+                raise NovaSyntaxError(
+                    f"chart '{chart.name}': fonction d'agrégation "
+                    f"'{chart.aggregation}' inconnue (valeurs acceptées : "
+                    f"{', '.join(sorted(kw.CHART_AGGREGATION_CANONICAL))})."
+                )
+            if not chart.x_field:
+                raise NovaSyntaxError(
+                    f"chart '{chart.name}': l'agrégation "
+                    f"('agregation: {chart.aggregation}') nécessite 'axe_x'/'x' "
+                    f"pour définir le regroupement."
+                )
+            if chart.aggregation != "count" and not chart.y_fields:
+                raise NovaSyntaxError(
+                    f"chart '{chart.name}': l'agrégation '{chart.aggregation}' "
+                    f"nécessite 'axe_y'/'y' (champ(s) numérique(s) à agréger)."
+                )
 
 
 def _validate_notifiers(program: NovaProgram) -> None:
@@ -591,6 +672,71 @@ def _validate_calendars(program: NovaProgram) -> None:
                 )
 
 
+def _validate_query_joins(program: NovaProgram) -> None:
+    """`jointure: <Entite> sur <local> = <distant>` (voir Query.joins) :
+    l'entité jointe doit être déclarée. Tout champ qualifié référencé dans
+    la requête (dans la jointure elle-même, ou ensuite dans `filtre:`/
+    `ou: { ... }`/`trier_par:`) doit résoudre sans ambiguïté à l'entité
+    principale de la requête ou à l'une des entités jointes, et le champ
+    nommé doit exister sur l'entité résolue (`id`, clé primaire implicite
+    non listée dans Entity.fields, est toujours accepté). Même philosophie
+    que `_validate_charts`/`_validate_calendars` : une faute de frappe dans
+    un nom d'entité/champ qualifié doit échouer à `nova check`/`nova
+    compile`, pas produire une AttributeError SQLAlchemy silencieuse au
+    runtime."""
+    known_entities = {e.name: e for e in program.entities}
+    for q in program.queries:
+        primary = known_entities.get(q.entity)
+        if primary is None:
+            continue  # entité principale inconnue : pas validé ici (voir _validate_charts pour le cas équivalent sur `chart`, absent pour `query` par choix historique)
+        scope = {q.entity: primary}
+        for j in q.joins:
+            joined = known_entities.get(j.entity)
+            if joined is None:
+                raise NovaSyntaxError(
+                    f"requete '{q.name}': 'jointure: {j.entity}' référence une "
+                    f"entité non déclarée."
+                )
+            scope[j.entity] = joined
+            _validate_query_field_ref(q.name, j.local_field, scope, q.entity, "jointure (local)")
+            _validate_query_field_ref(q.name, j.remote_field, scope, q.entity, "jointure (distant)")
+        for f in q.filters:
+            _validate_query_field_ref(q.name, f.field, scope, q.entity, "filtre")
+        for group in q.filter_groups:
+            for f in group.filters:
+                _validate_query_field_ref(q.name, f.field, scope, q.entity, "filtre (ou:)")
+        if q.order_by:
+            _validate_query_field_ref(q.name, q.order_by, scope, q.entity, "trier_par")
+
+
+def _validate_query_field_ref(query_name: str, qualified: str, scope: dict, default_entity: str, ctx: str) -> None:
+    if "." in qualified:
+        entity_name, field_name = qualified.split(".", 1)
+    else:
+        entity_name, field_name = default_entity, qualified
+    entity = scope.get(entity_name)
+    if entity is None:
+        raise NovaSyntaxError(
+            f"requete '{query_name}': '{ctx}: {qualified}' référence l'entité "
+            f"'{entity_name}', qui n'est ni l'entité principale ni jointe par "
+            f"un 'jointure:' de cette requête."
+        )
+    known_field_names = {f.name for f in entity.fields}
+    # Une clé étrangère générée par `appartient_a`/`belongs_to` (ex.
+    # `client_id` pour `appartient_a Client`) n'apparaît jamais dans
+    # `Entity.fields` (elle est synthétisée par codegen/api_fastapi.py à
+    # partir de `Entity.relations`) — l'accepter ici, sinon toute jointure
+    # sur une relation belongs_to existante échouerait à tort.
+    known_field_names |= {
+        f"{_to_snake_case(rel.target)}_id" for rel in entity.relations if rel.kind == "belongs_to"
+    }
+    if field_name != "id" and field_name not in known_field_names:
+        raise NovaSyntaxError(
+            f"requete '{query_name}': '{ctx}: {qualified}' — le champ "
+            f"'{field_name}' n'existe pas sur l'entité '{entity_name}'."
+        )
+
+
 def _validate_multilingual_fields(program: NovaProgram) -> None:
     """Le modificateur `multilingue`/`multilingual` (voir `field_decl`) n'est
     accepté que sur un champ `chaine`/`string` ou `texte`/`text` (les autres
@@ -669,27 +815,28 @@ def _validate_app_database(program: NovaProgram) -> None:
 
 def _validate_mongo_unsupported_features(program: NovaProgram) -> None:
     """`application { database: mongodb }` (tâche #29, voir
-    codegen/api_mongo.py) : le backend NoSQL généré (Beanie/Motor) ne
-    couvre, dans ce MVP, ni les requêtes déclaratives (`requete`/`query` —
-    filtres/tris/jointures construits directement en SQLAlchemy côté SQL),
-    ni les blocs `calendar`/`calendrier` (idem), ni les relations
-    `has_many`/`possede_plusieurs` matérialisées (résumé texte construit via
-    une requête SQL, voir `api_fastapi._has_many_relation_info`) — plutôt
-    que générer silencieusement un projet dont ces blocs seraient ignorés
-    ou casseraient à l'exécution, une erreur de compilation explicite est
-    levée ici. `chart` (sur une entité), `validation`, `email`/`notifier:`,
-    `auth`, les champs `fichier`/`image`/`multilingue`, `belongs_to` et
-    `application { langues: ... }` restent supportés (voir la docstring de
-    codegen/api_mongo.py pour le détail)."""
+    codegen/api_mongo.py) : le backend NoSQL généré (Beanie/Motor) couvre
+    désormais (tâche #34) les requêtes déclaratives `requete`/`query`
+    (filtre/`ou:`/tri/limite — traduits en filtres Beanie plutôt qu'en
+    SQLAlchemy), les blocs `calendar`/`calendrier` (vue ET export iCal —
+    voir codegen/api_mongo.py::_generate_mongo_calendar_ics_router) et les
+    relations `has_many`/`possede_plusieurs` matérialisées (résumé texte,
+    voir `api_mongo._mongo_has_many_relation_info`). Reste incompatible
+    dans ce MVP : une `jointure:` (task #32, propre au backend SQL —
+    `select().join(...)` n'a pas d'équivalent direct câblé ici) à
+    l'intérieur d'un `requete`/`query` — plutôt que de générer
+    silencieusement un projet dont la jointure serait ignorée ou
+    casserait à l'exécution, une erreur de compilation explicite est levée
+    ici. `chart` (sur une entité ou une requête), `validation`, `email`/
+    `notifier:`, `auth`, les champs `fichier`/`image`/`multilingue`,
+    `belongs_to` et `application { langues: ... }` restent supportés (voir
+    la docstring de codegen/api_mongo.py pour le détail)."""
     if program.database_engine() != "mongodb":
         return
     problems = []
-    if program.queries:
-        problems.append("le bloc 'requete'/'query'")
-    if program.calendars:
-        problems.append("le bloc 'calendar'/'calendrier'")
-    if any(rel.kind == "has_many" for e in program.entities for rel in e.relations):
-        problems.append("les relations 'has_many'/'possede_plusieurs' matérialisées")
+    joined_queries = [q.name for q in program.queries if q.joins]
+    if joined_queries:
+        problems.append(f"la 'jointure:' dans la/les requête(s) {', '.join(joined_queries)}")
     if problems:
         app_name = program.app.name if program.app else "?"
         raise NovaSyntaxError(
@@ -761,18 +908,87 @@ def _validate_relations(program: NovaProgram) -> None:
 _ORDERABLE_FIELD_TYPES = {"int", "float", "date", "datetime"}
 
 
+_VALIDATION_FUNCTION_ARITY = {
+    # (min_args, max_args) — max_args=None -> pas de limite haute.
+    "min": (2, None),
+    "max": (2, None),
+    "round": (1, 2),
+    "abs": (1, 1),
+}
+
+
+def _validate_validation_expr(
+    validation_name: str, expr: ValidationExpr, fields_by_name: dict, *, is_top: bool
+) -> None:
+    """Valide récursivement un côté (`ValidationExpr`) d'une règle
+    `validation` : champ connu (ni référence, ni multilingue), fonction
+    reconnue avec la bonne arité (`_VALIDATION_FUNCTION_ARITY`), et surtout
+    — au-delà d'un simple champ nu (`is_top=True` seulement pour le nœud
+    racine de l'expression) — tout champ combiné par une fonction ou un
+    `+`/`-` doit être numérique (int/float) : additionner ou passer une
+    date à `min()`/`round()` n'a pas de sens dans ce MVP (limite assumée,
+    documentée dans le README)."""
+    if expr.kind == "number":
+        return
+    if expr.kind == "field":
+        f = fields_by_name.get(expr.value)
+        if f is None:
+            raise NovaSyntaxError(
+                f"validation '{validation_name}': le champ '{expr.value}' ne "
+                f"correspond à aucun champ de l'entité concernée."
+            )
+        if f.is_reference or f.multilingual:
+            raise NovaSyntaxError(
+                f"validation '{validation_name}': le champ '{expr.value}' "
+                f"(référence ou multilingue) ne peut pas être utilisé dans "
+                f"une règle de validation."
+            )
+        if not is_top and f.type not in ("int", "float"):
+            raise NovaSyntaxError(
+                f"validation '{validation_name}': seuls des champs numériques "
+                f"(int/float) peuvent être combinés par une fonction ou un "
+                f"'+'/'-' ('{expr.value}' est de type '{f.type}')."
+            )
+        return
+    if expr.kind == "call":
+        arity = _VALIDATION_FUNCTION_ARITY.get(expr.value)
+        if arity is None:
+            raise NovaSyntaxError(
+                f"validation '{validation_name}': fonction '{expr.value}' inconnue "
+                f"(attendu : min/max/round/abs)."
+            )
+        min_args, max_args = arity
+        if len(expr.args) < min_args or (max_args is not None and len(expr.args) > max_args):
+            raise NovaSyntaxError(
+                f"validation '{validation_name}': '{expr.value}(...)' attend "
+                f"{'exactement ' + str(min_args) if min_args == max_args else f'entre {min_args} et {max_args}' if max_args else f'au moins {min_args}'} "
+                f"argument(s), {len(expr.args)} fourni(s)."
+            )
+        for arg in expr.args:
+            _validate_validation_expr(validation_name, arg, fields_by_name, is_top=False)
+        return
+    if expr.kind == "binop":
+        for arg in expr.args:
+            _validate_validation_expr(validation_name, arg, fields_by_name, is_top=False)
+        return
+
+
 def _validate_validations(program: NovaProgram) -> None:
-    """`validation <Nom> sur <Entite> { regle: <champA> <op> <champB>
-    message: "..." }` : l'entité doit exister, `<champA>`/`<champB>`
-    doivent être deux champs simples (ni référence, ni multilingue — un
-    champ multilingue n'a pas de valeur unique à comparer) déclarés sur
-    cette entité, et un opérateur d'ordre (`>`/`<`/`>=`/`<=`) ne peut
-    comparer que des champs dont le type l'autorise (`_ORDERABLE_FIELD_
-    TYPES` : int/float/date/date_heure — comparer deux chaînes avec `>`
-    n'a normalement aucun sens métier). Même philosophie que les autres
-    `_validate_*` : une règle mal déclarée doit être rejetée à la
-    compilation plutôt que de lever une TypeError silencieuse au runtime
-    (voir codegen/api_fastapi.py::_validation_check_lines)."""
+    """`validation <Nom> sur <Entite> { regle: <expr> <op> <expr> message:
+    "..." }` : l'entité doit exister ; chaque expression (voir
+    `ValidationExpr` dans ast_nodes.py — un champ nu, une constante, un
+    appel de fonction whitelist min/max/round/abs, ou une somme/différence
+    de sous-expressions) est validée récursivement par
+    `_validate_validation_expr` ci-dessus. Un opérateur d'ordre (`>`/`<`/
+    `>=`/`<=`) sur une expression réduite à un simple champ nu (pas
+    d'arithmétique) exige en plus que ce champ soit d'un type ordonnable
+    (`_ORDERABLE_FIELD_TYPES` : int/float/date/date_heure) — une expression
+    avec arithmétique est, elle, toujours numérique par construction
+    (`_validate_validation_expr` l'impose déjà sur chaque feuille). Même
+    philosophie que les autres `_validate_*` : une règle mal déclarée doit
+    être rejetée à la compilation plutôt que de lever une TypeError
+    silencieuse au runtime (voir codegen/api_fastapi.py::
+    _validation_check_lines)."""
     known_entities = {e.name: e for e in program.entities}
     for validation in program.validations:
         entity = known_entities.get(validation.entity)
@@ -783,28 +999,18 @@ def _validate_validations(program: NovaProgram) -> None:
             )
         fields_by_name = {f.name: f for f in entity.fields}
         for rule in validation.rules:
-            for champ in (rule.field_a, rule.field_b):
-                f = fields_by_name.get(champ)
-                if f is None:
-                    raise NovaSyntaxError(
-                        f"validation '{validation.name}': le champ '{champ}' ne "
-                        f"correspond à aucun champ de l'entité '{validation.entity}'."
-                    )
-                if f.is_reference or f.multilingual:
-                    raise NovaSyntaxError(
-                        f"validation '{validation.name}': le champ '{champ}' "
-                        f"(référence ou multilingue) ne peut pas être comparé "
-                        f"dans une règle de validation."
-                    )
+            _validate_validation_expr(validation.name, rule.expr_a, fields_by_name, is_top=True)
+            _validate_validation_expr(validation.name, rule.expr_b, fields_by_name, is_top=True)
             if rule.op in (">", "<", ">=", "<="):
-                type_a = fields_by_name[rule.field_a].type
-                type_b = fields_by_name[rule.field_b].type
-                if type_a not in _ORDERABLE_FIELD_TYPES or type_b not in _ORDERABLE_FIELD_TYPES:
-                    raise NovaSyntaxError(
-                        f"validation '{validation.name}': l'opérateur '{rule.op}' "
-                        f"nécessite des champs numériques ou date/date_heure "
-                        f"('{rule.field_a}': {type_a}, '{rule.field_b}': {type_b})."
-                    )
+                for expr in (rule.expr_a, rule.expr_b):
+                    if expr.kind == "field":
+                        t = fields_by_name[expr.value].type
+                        if t not in _ORDERABLE_FIELD_TYPES:
+                            raise NovaSyntaxError(
+                                f"validation '{validation.name}': l'opérateur "
+                                f"'{rule.op}' nécessite un champ numérique ou "
+                                f"date/date_heure ('{expr.value}' est '{t}')."
+                            )
 
 
 def parse_file(path: str | Path) -> NovaProgram:

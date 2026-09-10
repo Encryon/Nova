@@ -1,6 +1,7 @@
 """Tests du codegen : le code généré doit être syntaxiquement valide."""
 
 import ast
+import asyncio
 import contextlib
 import importlib
 import io
@@ -243,6 +244,46 @@ def test_custom_extension_scaffolds_are_never_overwritten(tmp_path):
     assert frontend_custom.read_text(encoding="utf-8") == "# modifié à la main par l'utilisateur\n"
 
 
+def test_alembic_scaffold_generated_once_for_sql_backend(tmp_path):
+    """Migrations Alembic (tâche #38, choix confirmé par Alan : « structure
+    générée une fois + `nova migrate` ») : `backend/alembic.ini`,
+    `backend/migrations/env.py`/`script.py.mako`/`versions/` doivent exister
+    pour un backend SQL, `alembic` doit être dans `requirements.txt`, et —
+    exactement comme `routers_custom/` (voir test_custom_extension_scaffolds_
+    are_never_overwritten ci-dessus) — rien de tout ça ne doit être réécrit
+    par une recompilation (l'historique réel des révisions appliquées à une
+    base de production serait sinon détruit à chaque `nova compile`).
+    L'exécution réelle d'`alembic revision --autogenerate`/`upgrade head`
+    contre ce scaffold est couverte par tests/test_cli.py (processus
+    `alembic` réel, pas de mock)."""
+    program = parse_file(EXAMPLES / "blog.en.nova")
+    generate_project(program, tmp_path)
+
+    alembic_ini = tmp_path / "backend/alembic.ini"
+    env_py = tmp_path / "backend/migrations/env.py"
+    script_mako = tmp_path / "backend/migrations/script.py.mako"
+    versions_dir = tmp_path / "backend/migrations/versions"
+    assert alembic_ini.exists()
+    assert "script_location = migrations" in alembic_ini.read_text(encoding="utf-8")
+    env_src = env_py.read_text(encoding="utf-8")
+    assert "from app import models" in env_src
+    assert "from app.database import DATABASE_URL, engine" in env_src
+    assert "target_metadata = SQLModel.metadata" in env_src
+    assert "import sqlmodel" in script_mako.read_text(encoding="utf-8")
+    assert versions_dir.is_dir()
+
+    requirements = (tmp_path / "backend/requirements.txt").read_text(encoding="utf-8")
+    assert "alembic" in requirements
+
+    alembic_ini.write_text(alembic_ini.read_text(encoding="utf-8") + "\n# modifié à la main\n", encoding="utf-8")
+    (versions_dir / "0001_fake_revision.py").write_text("# révision déjà appliquée en prod\n", encoding="utf-8")
+
+    generate_project(program, tmp_path)  # nouvelle compilation, même AST
+
+    assert alembic_ini.read_text(encoding="utf-8").endswith("\n# modifié à la main\n")
+    assert (versions_dir / "0001_fake_revision.py").read_text(encoding="utf-8") == "# révision déjà appliquée en prod\n"
+
+
 def test_custom_frontend_extension_point_is_scaffolded_and_wired(tmp_path):
     program = parse_file(EXAMPLES / "blog.en.nova")
     generate_project(program, tmp_path)
@@ -354,6 +395,14 @@ def test_auth_and_query_flow_end_to_end(tmp_path):
     assert "from sqlalchemy import or_" in router_src
     assert "query = query.where(models.Produit.stock < 10)" in router_src
     assert "query.where(or_(models.Produit.prix < 10, models.Produit.prix > 1000))" in router_src
+    # `requete AccessoiresAvecProduit` : jointure explicite -> `select()` sur
+    # les deux entités + `.join(...)`, filtre sur le champ qualifié de
+    # l'entité jointe, réponse = liste de dicts (pas de response_model
+    # unique) avec l'entité jointe nichée sous une clé nommée d'après elle.
+    assert "query = select(models.Accessoire, models.Produit)" in router_src
+    assert "query = query.join(models.Produit, models.Accessoire.produit_id == models.Produit.id)" in router_src
+    assert "query = query.where(models.Produit.prix > 100)" in router_src
+    assert 'item["produit"] = row[1].model_dump()' in router_src
 
     backend_dir = str(tmp_path / "backend")
     sys.path.insert(0, backend_dir)
@@ -440,10 +489,12 @@ def test_auth_and_query_flow_end_to_end(tmp_path):
             assert r.status_code == 201
             ordinateur_id = r.json()["id"]
 
+            produit_ids = {}
             for nom, prix in [("Stylo", 2), ("Chaise", 80), ("Bureau", 350)]:
-                client.post(
+                r = client.post(
                     "/produits", json={"nom": nom, "prix": prix, "stock": 1}, headers=admin_headers
                 )
+                produit_ids[nom] = r.json()["id"]
 
             r = client.get("/requetes/produits-chers")
             assert r.status_code == 200
@@ -524,6 +575,21 @@ def test_auth_and_query_flow_end_to_end(tmp_path):
             # KeyError/None, voir `_related_text_lines` dans api_fastapi.py).
             stylo_row = next(row for row in client.get("/produits", headers=admin_headers).json() if row["nom"] == "Stylo")
             assert stylo_row["accessoires_text"] == ""
+
+            # `requete AccessoiresAvecProduit sur Accessoire { jointure:
+            # Produit sur produit_id = Produit.id filtre: Produit.prix > 100
+            # }` : jointure explicite (voir ast_nodes.QueryJoin), filtre sur
+            # un champ de l'entité JOINTE (Produit), pas de l'entité
+            # principale (Accessoire) — Souris/Clavier (liés à Ordinateur,
+            # prix=1200) doivent apparaître, un accessoire lié à Stylo
+            # (prix=2) ne doit pas.
+            client.post("/accessoires", json={"nom": "Housse", "produit_id": produit_ids["Stylo"]})
+            r = client.get("/requetes/accessoires-avec-produit")
+            assert r.status_code == 200
+            join_rows = r.json()
+            assert {row["nom"] for row in join_rows} == {"Souris", "Clavier"}
+            assert all(row["produit"]["nom"] == "Ordinateur" for row in join_rows)
+            assert all(row["produit"]["prix"] == 1200 for row in join_rows)
     finally:
         sys.path.remove(backend_dir)
         if old_db_url is None:
@@ -812,6 +878,79 @@ def test_validation_enforced_real_execution(tmp_path):
             )
             assert r.status_code == 200
             assert r.json()["date_fin"] == "2026-02-01T10:00:00"
+    finally:
+        sys.path.remove(backend_dir)
+        if old_db_url is None:
+            os.environ.pop("NOVA_DATABASE_URL", None)
+        else:
+            os.environ["NOVA_DATABASE_URL"] = old_db_url
+        for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+            del sys.modules[mod_name]
+
+
+def test_validation_rich_expressions_functions_and_arithmetic_real_execution(tmp_path):
+    """Mini-langage de validation étendu (au-delà de la simple comparaison
+    directe entre deux champs) : fonctions whitelist (min/max/round/abs,
+    voir kw.VALIDATION_FUNCTIONS) et arithmétique (+/-) combinant PLUS de
+    deux champs. Exécute réellement le backend généré : une règle violée
+    renvoie 422 sans écrire en base, une règle respectée laisse passer."""
+    src = """
+    entity Invoice {
+      field nom: string required
+      field prix_ht: float required
+      field frais_port: float required
+      field prix_ttc: float required
+      field remise: float required
+    }
+    api Invoice { liste creer }
+    validation InvoiceCoherente sur Invoice {
+      regle: prix_ttc == prix_ht + frais_port message: "Le TTC doit valoir HT + frais de port."
+      regle: min(prix_ht, remise) >= 0 message: "Le prix HT et la remise doivent etre positifs ou nuls."
+      regle: round(prix_ht, 2) == prix_ht message: "Le prix HT ne doit pas avoir plus de 2 decimales."
+    }
+    """
+    program = parse_source(src)
+    generate_project(program, tmp_path)
+
+    router_src = (tmp_path / "backend/app/routers/invoices.py").read_text(encoding="utf-8")
+    assert "not (item.prix_ttc == (item.prix_ht + item.frais_port))" in router_src
+    assert "not (min(item.prix_ht, item.remise) >= 0)" in router_src
+    assert "not (round(item.prix_ht, 2) == item.prix_ht)" in router_src
+
+    backend_dir = str(tmp_path / "backend")
+    sys.path.insert(0, backend_dir)
+    old_db_url = os.environ.get("NOVA_DATABASE_URL")
+    os.environ["NOVA_DATABASE_URL"] = f"sqlite:///{tmp_path}/test_validation_rich.db"
+    for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[mod_name]
+    try:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        with TestClient(main.app) as client:
+            # TTC != HT + frais de port -> rejeté par la 1ère règle.
+            r = client.post(
+                "/invoices/",
+                json={"nom": "Incohérente", "prix_ht": 100.0, "frais_port": 10.0, "prix_ttc": 999.0, "remise": 0.0},
+            )
+            assert r.status_code == 422
+            assert "TTC doit valoir" in r.json()["detail"]
+            assert client.get("/invoices/").json() == []
+
+            # remise négative -> rejeté par la 2e règle (min(prix_ht, remise) >= 0).
+            r = client.post(
+                "/invoices/",
+                json={"nom": "RemiseInvalide", "prix_ht": 100.0, "frais_port": 10.0, "prix_ttc": 110.0, "remise": -5.0},
+            )
+            assert r.status_code == 422
+            assert "positifs ou nuls" in r.json()["detail"]
+
+            # Tout cohérent -> accepté.
+            r = client.post(
+                "/invoices/",
+                json={"nom": "Valide", "prix_ht": 100.0, "frais_port": 10.0, "prix_ttc": 110.0, "remise": 5.0},
+            )
+            assert r.status_code == 201
     finally:
         sys.path.remove(backend_dir)
         if old_db_url is None:
@@ -1218,19 +1357,30 @@ def test_mongo_backend_generates_beanie_documents_and_nosql_requirements(tmp_pat
     assert "SQLModel" not in scaffold
     assert "get_session" not in scaffold  # variante Mongo du scaffold, pas la SQL
 
+    # Migrations Alembic (tâche #38) : n'a de sens que pour un schéma SQL
+    # figé — MongoDB/Beanie (schéma souple par document) ne doit générer ni
+    # `alembic.ini` ni `migrations/`, ni tirer `alembic` en dépendance.
+    assert not (tmp_path / "backend/alembic.ini").exists()
+    assert not (tmp_path / "backend/migrations").exists()
+    assert "alembic" not in requirements
+
 
 def test_mongo_unsupported_features_rejected_at_compile_time():
-    for extra, needle in [
-        (
-            "entity Cmd { field n: chaine possede_plusieurs Ligne }\n"
-            "entity Ligne { field n: chaine appartient_a Cmd }\n",
-            "has_many",
-        ),
-        ('requete Cher sur Produit { filtre: prix > 10 }\n', "requete"),
-    ]:
-        src = _MONGO_NOVA + "\n" + extra
-        with pytest.raises(NovaSyntaxError, match="mongodb"):
-            parse_source(src)
+    # Depuis la levée des limitations Mongo (query/calendrier/has_many),
+    # seule la jointure explicite (`jointure:` dans une `requete`) reste
+    # incompatible avec `database: mongodb` — voir aussi les tests
+    # dédiés dans test_parser.py (test_mongo_backend_rejects_query_join_only,
+    # test_mongo_backend_allows_query_calendar_and_has_many).
+    src = (
+        _MONGO_NOVA
+        + "\n"
+        + "requete Cher sur Produit {\n"
+        + "  jointure: Categorie sur categorie_id = Categorie.id\n"
+        + "  filtre: prix > 10\n"
+        + "}\n"
+    )
+    with pytest.raises(NovaSyntaxError, match="mongodb"):
+        parse_source(src)
 
 
 def test_mongo_backend_real_execution_auth_crud_uniqueness_and_validation(tmp_path):
@@ -1317,6 +1467,111 @@ def test_mongo_backend_real_execution_auth_crud_uniqueness_and_validation(tmp_pa
 
                 assert client.delete(f"/produits/{prod_id}", headers=headers).status_code == 204
                 assert client.get(f"/produits/{prod_id}", headers=headers).status_code == 404
+    finally:
+        sys.path.remove(backend_dir)
+        for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+            del sys.modules[mod_name]
+
+
+_MONGO_FEATURES_NOVA = """
+application BoutiqueMongoFeatures {
+  nom: "BoutiqueMongoFeatures"
+  database: mongodb
+  langues: fr, en
+}
+
+entity Gadget {
+  field nom: chaine requis
+  field prix: decimal requis
+  field date_ajout: date_heure
+  possede_plusieurs Piece
+}
+
+entity Piece {
+  field nom: chaine requis
+  appartient_a Gadget
+}
+
+api Gadget { liste creer modifier supprimer obtenir }
+api Piece { liste creer }
+
+requete GadgetsChers sur Gadget {
+  filtre: prix > 50
+  trier_par: prix desc
+  limite: 10
+}
+
+calendrier Ajouts sur Gadget {
+  champ_date: date_ajout
+  champ_titre: nom
+}
+"""
+
+
+def test_mongo_backend_real_execution_query_calendar_and_has_many(tmp_path):
+    """Vérification par exécution réelle (tâche #34, mêmes principes que
+    `test_mongo_backend_real_execution_auth_crud_uniqueness_and_validation`)
+    des trois fonctionnalités désormais levées côté MongoDB : `requete`
+    (filtre/tri/limite, sans jointure — toujours interdite sur ce backend),
+    `calendrier` (export `.ics`), et `possede_plusieurs` (résumé texte des
+    enregistrements liés dans `liste`/`obtenir`)."""
+    program = parse_source(_MONGO_FEATURES_NOVA)
+    generate_project(program, tmp_path)
+    backend_dir = str(tmp_path / "backend")
+    sys.path.insert(0, backend_dir)
+    for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[mod_name]
+    try:
+        with _mongo_mock():
+            from fastapi.testclient import TestClient
+
+            main = importlib.import_module("app.main")
+            with TestClient(main.app) as client:
+                r = client.post(
+                    "/gadgets/",
+                    json={"nom": "Cher", "prix": 100.0, "date_ajout": "2026-01-15T10:00:00"},
+                )
+                assert r.status_code == 201
+                gadget_cher_id = r.json()["id"]
+
+                r = client.post(
+                    "/gadgets/",
+                    json={"nom": "Pas cher", "prix": 5.0, "date_ajout": "2026-02-01T10:00:00"},
+                )
+                assert r.status_code == 201
+
+                # `requete GadgetsChers` : filtre prix > 50, tri desc, limite
+                # 10 -> ne doit renvoyer que "Cher", pas "Pas cher".
+                r = client.get("/requetes/gadgets-chers")
+                assert r.status_code == 200
+                noms = [item["nom"] for item in r.json()]
+                assert noms == ["Cher"]
+
+                # `calendrier Ajouts` : export iCalendar réel.
+                r = client.get("/ics/ajouts.ics")
+                assert r.status_code == 200
+                assert "BEGIN:VCALENDAR" in r.text
+                assert "SUMMARY:Cher" in r.text
+                assert "SUMMARY:Pas cher" in r.text
+
+                # `possede_plusieurs Piece` : résumé texte sur liste/obtenir.
+                r = client.post("/pieces/", json={"nom": "Vis", "gadget_id": gadget_cher_id})
+                assert r.status_code == 201
+                r = client.post("/pieces/", json={"nom": "Ecrou", "gadget_id": gadget_cher_id})
+                assert r.status_code == 201
+
+                r = client.get("/gadgets/")
+                assert r.status_code == 200
+                by_id = {g["id"]: g for g in r.json()}
+                assert by_id[gadget_cher_id]["pieces_text"] in ("Vis, Ecrou", "Ecrou, Vis")
+                assert by_id[gadget_cher_id]["pieces_text"] != ""
+                # Le gadget sans pièce a un résumé vide, pas une erreur.
+                pas_cher_id = next(g["id"] for g in r.json() if g["nom"] == "Pas cher")
+                assert by_id[pas_cher_id]["pieces_text"] == ""
+
+                r = client.get(f"/gadgets/{gadget_cher_id}")
+                assert r.status_code == 200
+                assert r.json()["pieces_text"] in ("Vis, Ecrou", "Ecrou, Vis")
     finally:
         sys.path.remove(backend_dir)
         for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
@@ -1538,6 +1793,59 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
         assert type(multi_series_page).__name__ == "Box"
         assert type(radar_page).__name__ == "Box"
         assert type(scatter_page).__name__ == "Box"
+        # Nouveaux types de graphique (tâche #35) : donut (anneau) et funnel
+        # (entonnoir) — voir full_featured.nova (`PrixParProduit`/
+        # `StockEntonnoir`). Même contrainte de singleton `rx.App()`.
+        donut_page = main.prix_par_produit_chart_page()
+        funnel_page = main.stock_entonnoir_chart_page()
+        assert type(donut_page).__name__ == "Box"
+        assert type(funnel_page).__name__ == "Box"
+        # Agrégation (tâche #35) : `NombreProduits` (`agregation: compte`,
+        # sans `axe_y`) — la page se construit, et le helper Python généré
+        # `_nova_chart_aggregate` est vérifié directement par exécution
+        # réelle avec des données synthétiques (plusieurs lignes par groupe).
+        aggregate_page = main.nombre_produits_chart_page()
+        assert type(aggregate_page).__name__ == "Box"
+        assert hasattr(main, "_nova_chart_aggregate")
+        agg = main._nova_chart_aggregate(
+            [
+                {"nom": "Stylo", "prix": 10},
+                {"nom": "Stylo", "prix": 12},
+                {"nom": "Chaise", "prix": 100},
+            ],
+            "nom",
+            ["y"],
+            "count",
+        )
+        assert {"nom": "Stylo", "y": 2} in agg
+        assert {"nom": "Chaise", "y": 1} in agg
+        agg_sum = main._nova_chart_aggregate(
+            [
+                {"nom": "Stylo", "prix": 10},
+                {"nom": "Stylo", "prix": 12},
+                {"nom": "Chaise", "prix": 100},
+            ],
+            "nom",
+            ["prix"],
+            "sum",
+        )
+        assert {"nom": "Stylo", "prix": 22.0} in agg_sum
+        assert {"nom": "Chaise", "prix": 100.0} in agg_sum
+        agg_avg = main._nova_chart_aggregate(
+            [{"nom": "Stylo", "prix": 10}, {"nom": "Stylo", "prix": 20}],
+            "nom",
+            ["prix"],
+            "avg",
+        )
+        assert agg_avg == [{"nom": "Stylo", "prix": 15.0}]
+        # Valeur manquante/non numérique ignorée silencieusement, pas d'erreur.
+        agg_missing = main._nova_chart_aggregate(
+            [{"nom": "Stylo", "prix": None}, {"nom": "Stylo", "prix": "n/a"}],
+            "nom",
+            ["prix"],
+            "max",
+        )
+        assert agg_missing == [{"nom": "Stylo", "prix": None}]
         # Champs riches sur `entité Produit` : formulaire (upload + color
         # picker) et carte (miniature/lien/pastille/badge) se construisent.
         form_page = main.nouveau_produit_page()
@@ -1590,6 +1898,107 @@ def test_chart_frontend_module_actually_imports_and_builds_all_pages(tmp_path):
         original_selected_day = state.selected_day
         state.prev()
         assert state.selected_day != original_selected_day
+        # Glisser-déposer du calendrier (tâche #36) : `NovaDnd` (voir
+        # codegen/ui_reflex.py::_CALENDAR_DND_HELPER) est bien injecté une
+        # fois dans le module, et `drop_on_day` (déplacement + création
+        # rapide) est appelé pour de vrai — la couche réseau (httpx) est
+        # remplacée par un faux client qui enregistre les appels, mais tout
+        # le reste (résolution du premier événement du jour source,
+        # préservation de l'heure pour `date_heure`, construction du
+        # payload) est le VRAI code généré qui s'exécute.
+        dnd_pkg_source = (pkg_dir / f"{pkg_name}.py").read_text(encoding="utf-8")
+        assert "NovaDnd" in dnd_pkg_source
+        assert hasattr(main, "NovaDnd")
+        assert hasattr(main.AjoutsCalendarState, "drop_on_day")
+        assert hasattr(main.AjoutsCalendarState, "start_drag_day")
+        # `entité Produit` n'a aucun autre champ requis que `nom` (= le
+        # `champ_titre` du calendrier) et `date_ajout` (= `champ_date`), et
+        # aucune relation `appartient_a` -> `_calendar_quick_create_safe`
+        # doit avoir généré le chip de création rapide.
+        assert hasattr(main.AjoutsCalendarState, "start_drag_new")
+        assert "+ Nouvel évènement / + New event" in dnd_pkg_source
+
+        dnd_recorded = []
+
+        class _FakeDndResponse:
+            def __init__(self, status_code=200, data=None):
+                self.status_code = status_code
+                self._data = data if data is not None else []
+
+            def json(self):
+                return self._data
+
+        class _FakeDndClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+            async def get(self, url, **kwargs):
+                dnd_recorded.append(("GET", url, kwargs))
+                return _FakeDndResponse(200, [])
+
+            async def post(self, url, **kwargs):
+                dnd_recorded.append(("POST", url, kwargs))
+                return _FakeDndResponse(201, {"id": "new-1"})
+
+            async def put(self, url, **kwargs):
+                dnd_recorded.append(("PUT", url, kwargs))
+                return _FakeDndResponse(200, {"id": "p1"})
+
+        from unittest.mock import patch as _dnd_patch
+
+        # `RappelsCalendarState` (calendrier NON protégé sur `entité
+        # Rappel`) plutôt que `AjoutsCalendarState` : `drop_on_day` d'un
+        # calendrier protégé appelle `await self.get_state(AuthState)`, qui
+        # a besoin d'un `EventContext` Reflex actif (une vraie requête) —
+        # absent quand un test instancie un state directement et appelle sa
+        # coroutine avec `asyncio.run`, d'où `entité Rappel` dédiée (voir
+        # full_featured.nova) pour exercer le VRAI code généré de bout en
+        # bout sans avoir à simuler tout le runtime Reflex.
+        assert hasattr(main.RappelsCalendarState, "start_drag_new")
+        assert hasattr(main.RappelsCalendarState, "drop_on_day")
+        cal_state = main.RappelsCalendarState()
+        cal_state.rows = [
+            {"id": "r1", "titre": "Appel client", "date_rappel": "2026-09-05T10:00:00"},
+        ]
+        with _dnd_patch.object(main.httpx, "AsyncClient", _FakeDndClient):
+            # Déplacement : le jour source (2026-09-05) porte "Appel client"
+            # -> déposé sur 2026-09-10, PUT sur son id avec l'heure
+            # (10:00:00) préservée (date_rappel est `date_heure`/datetime).
+            cal_state.dragging = "2026-09-05"
+            asyncio.run(cal_state.drop_on_day("2026-09-10"))
+        assert cal_state.dragging == ""
+        put_calls = [c for c in dnd_recorded if c[0] == "PUT"]
+        assert len(put_calls) == 1
+        _, put_url, put_kwargs = put_calls[0]
+        assert put_url.endswith("/rappels/r1")
+        assert put_kwargs["json"]["date_rappel"] == "2026-09-10T10:00:00"
+
+        dnd_recorded.clear()
+        with _dnd_patch.object(main.httpx, "AsyncClient", _FakeDndClient):
+            # Création rapide : le chip "+" (dragging == "__new__") déposé
+            # sur 2026-09-20 -> POST avec seulement date_rappel (minuit,
+            # aucune heure à préserver) + titre (libellé par défaut).
+            cal_state.dragging = "__new__"
+            asyncio.run(cal_state.drop_on_day("2026-09-20"))
+        post_calls = [c for c in dnd_recorded if c[0] == "POST"]
+        assert len(post_calls) == 1
+        _, post_url, post_kwargs = post_calls[0]
+        assert post_url.endswith("/rappels/")
+        assert post_kwargs["json"]["date_rappel"] == "2026-09-20T00:00:00"
+        assert post_kwargs["json"]["titre"] == "Nouvel évènement / New event"
+
+        # Déposer un jour sur lui-même (ou sans glisser-déposer en cours)
+        # est un no-op silencieux : aucun appel réseau.
+        dnd_recorded.clear()
+        cal_state.dragging = "2026-09-20"
+        asyncio.run(cal_state.drop_on_day("2026-09-20"))
+        assert dnd_recorded == []
+        cal_state.dragging = ""
+        asyncio.run(cal_state.drop_on_day("2026-09-21"))
+        assert dnd_recorded == []
         # Contenu multilingue : `LangState` + fonction de traduction générée
         # pour `titre_catalogue`, et champ `description` (multilingue) sur
         # `entité Produit` porté par 6 state vars sur la page formulaire.
@@ -2337,6 +2746,145 @@ def test_email_attachment_field_attaches_uploaded_file_real_execution(tmp_path):
             del sys.modules[mod_name]
 
 
+def test_email_template_file_copied_and_used_for_render_real_execution(tmp_path):
+    """`email { ... template: "gabarit.html" }` (tâche #37) : le fichier
+    HTML externe référencé, placé à côté du .nova source, doit (1) être
+    copié tel quel dans `backend/app/email_templates/notification.html`
+    (même mécanisme que `application { css: "..." }`, voir
+    codegen/__init__.py::generate_project) et (2) réellement piloter le
+    sujet/corps des notifications envoyées : sujet extrait de <title>,
+    placeholders `{{champ}}` substitués par les valeurs de l'enregistrement
+    (y compris pour `delete`, où l'enregistrement est capturé AVANT la
+    suppression — voir _generate_router/deleted_values), à la place du
+    sujet/corps codés en dur (comportement par défaut sans `template:`,
+    déjà couvert par test_email_notification_sent_on_create_and_delete_
+    real_execution)."""
+    from unittest.mock import MagicMock, patch
+
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "gabarit.html").write_text(
+        "<html><head><title>[NOVA] {{entity}} {{action}} — {{client}}</title></head>"
+        "<body><h1>Bonjour {{client}}</h1>"
+        "<p>Message : {{message}}</p>"
+        "<p>Contact : {{contact}}</p></body></html>",
+        encoding="utf-8",
+    )
+
+    src = """
+    entity Notice {
+      field client: string required
+      field contact: string required
+      field message: string
+    }
+    email {
+      host: "smtp.example.com"
+      port: 2525
+      from: "noreply@example.com"
+      to: "ops@example.com"
+      template: "gabarit.html"
+    }
+    api Notice {
+      list
+      create
+      delete
+      notifier: create, delete
+      destinataire: contact
+    }
+    """
+    program = parse_source(src)
+    out_dir = tmp_path / "out"
+    generate_project(program, out_dir, source_dir=source_dir)
+
+    # (1) Le contenu réel du fichier référencé remplace le placeholder.
+    copied = (out_dir / "backend/app/email_templates/notification.html").read_text(encoding="utf-8")
+    assert "Bonjour {{client}}" in copied
+
+    backend_dir = str(out_dir / "backend")
+    sys.path.insert(0, backend_dir)
+    old_db_url = os.environ.get("NOVA_DATABASE_URL")
+    os.environ["NOVA_DATABASE_URL"] = f"sqlite:///{out_dir}/test_email_template.db"
+    for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+        del sys.modules[mod_name]
+    try:
+        from fastapi.testclient import TestClient
+
+        main = importlib.import_module("app.main")
+        with patch("app.emailer.smtplib.SMTP") as mock_smtp:
+            smtp_instance = MagicMock()
+            mock_smtp.return_value.__enter__.return_value = smtp_instance
+            with TestClient(main.app) as client:
+                created = client.post(
+                    "/notices",
+                    json={"client": "Alan", "contact": "alan@example.com", "message": "Tout va bien"},
+                )
+                assert created.status_code == 201
+                item_id = created.json()["id"]
+
+                deleted = client.delete(f"/notices/{item_id}")
+                assert deleted.status_code == 204
+
+            # create + delete -> 2 emails.
+            assert smtp_instance.send_message.call_count == 2
+            sent = [call.args[0] for call in smtp_instance.send_message.call_args_list]
+
+            # (2a) create : sujet extrait de <title>, placeholders substitués.
+            assert sent[0]["Subject"] == "[NOVA] Notice created — Alan"
+            html_part = sent[0].get_body(preferencelist=("html",))
+            plain_part = sent[0].get_body(preferencelist=("plain",))
+            assert "Bonjour Alan" in html_part.get_content()
+            assert "Message : Tout va bien" in html_part.get_content()
+            assert "Contact : alan@example.com" in html_part.get_content()
+            # Repli texte brut : mêmes valeurs, sans balises HTML.
+            assert "Bonjour Alan" in plain_part.get_content()
+            assert "<h1>" not in plain_part.get_content()
+
+            # (2b) delete : l'enregistrement est déjà expiré côté SQLAlchemy à
+            # cet instant, mais deleted_values (capturé avant la suppression,
+            # voir codegen) permet quand même au template de retrouver "Alan".
+            assert sent[1]["Subject"] == "[NOVA] Notice deleted — Alan"
+            html_part_del = sent[1].get_body(preferencelist=("html",))
+            assert "Bonjour Alan" in html_part_del.get_content()
+    finally:
+        sys.path.remove(backend_dir)
+        if old_db_url is None:
+            os.environ.pop("NOVA_DATABASE_URL", None)
+        else:
+            os.environ["NOVA_DATABASE_URL"] = old_db_url
+        for mod_name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
+            del sys.modules[mod_name]
+
+
+def test_email_template_placeholder_used_when_referenced_file_missing(tmp_path):
+    """Sans `source_dir`, ou si le fichier référencé n'existe pas à
+    l'emplacement attendu, la compilation ne doit jamais échouer (même
+    philosophie « best-effort » que `application { css: "..." }`) : un
+    placeholder commenté est laissé à la place du vrai template, et le
+    module `emailer.py` généré reste syntaxiquement valide (render_email_
+    template renvoie alors un HTML vide plutôt que de planter)."""
+    import ast
+
+    src = """
+    entity Rapport {
+      field client: string required
+    }
+    email {
+      host: "smtp.example.com"
+      template: "gabarit_absent.html"
+    }
+    api Rapport {
+      create
+      notifier: create
+    }
+    """
+    program = parse_source(src)
+    generate_project(program, tmp_path)  # pas de source_dir
+    placeholder = (tmp_path / "backend/app/email_templates/notification.html").read_text(encoding="utf-8")
+    assert "Remplacé par le contenu" in placeholder
+    ast.parse((tmp_path / "backend/app/emailer.py").read_text(encoding="utf-8"))
+    ast.parse((tmp_path / "backend/app/routers/rapports.py").read_text(encoding="utf-8"))
+
+
 # --------------------------------------------------------------- calendar ---
 # Bloc `calendar <Nom> sur <Entite> { ... }` : vue calendrier mensuelle,
 # grille calculée côté serveur avec la seule stdlib (`calendar`/`datetime`),
@@ -2385,11 +2933,22 @@ def test_calendar_generates_state_route_and_navbar_link(tmp_path):
     assert 'app.add_page(event_cal_calendar_page, route="/calendriers/event-cal"' in source
     # Lien de navigation vers le calendrier, comme pour une page/un graphique.
     assert 'rx.link("EventCal", href="/calendriers/event-cal"' in source
-    # Vues semaine/jour (sans glisser-déposer, décision explicite pour cette
-    # extension) + lien d'export iCal — voir codegen/ui_reflex.py.
+    # Vues semaine/jour + lien d'export iCal — voir codegen/ui_reflex.py.
     assert 'rx.button("Semaine / Week"' in source
     assert 'rx.button("Jour / Day"' in source
     assert 'href=f"{PUBLIC_BACKEND_URL}/ics/event-cal.ics"' in source
+    # Glisser-déposer (tâche #36) : `NovaDnd` émis une fois, cellules-jour
+    # mois/semaine draggable + droppable, et chip de création rapide généré
+    # (`entity Event` n'a aucun autre champ requis que `title`/`starts_at`,
+    # et `location` a un défaut implicite car non requis — voir
+    # `_calendar_quick_create_safe`).
+    assert "class NovaDnd(rx.el.Div):" in source
+    assert 'on_drag_start=lambda: EventCalCalendarState.start_drag_day(day["date"]),' in source
+    assert 'on_drop=lambda: EventCalCalendarState.drop_on_day(day["date"]),' in source
+    assert "on_drag_over=rx.prevent_default," in source
+    assert "async def drop_on_day(self, target_iso: str):" in source
+    assert "def start_drag_new(self):" in source
+    assert '"+ Nouvel évènement / + New event"' in source
 
 
 def test_calendar_ics_export_real_execution(tmp_path):
@@ -2519,6 +3078,126 @@ def test_calendar_without_title_field_uses_bullet_marker():
     main_src = next(v for k, v in files.items() if k.endswith(".py") and "custom" not in k and "rxconfig" not in k)
     assert 'events_text = ", ".join(' in main_src
     assert '"•"' in main_src
+
+
+def test_calendar_quick_create_chip_omitted_when_entity_has_other_required_field():
+    """Tâche #36 : le chip "+ Nouvel évènement" (création par glisser-
+    déposer) exige de pouvoir poster un enregistrement valide avec pour
+    seule charge utile `date_field` (+ `title_field`, toujours rempli d'un
+    libellé par défaut) — voir `_calendar_quick_create_safe`. Un troisième
+    champ requis sans valeur par défaut rend ça impossible : le chip est
+    omis, mais le déplacement (`drop_on_day`/`start_drag_day`, un simple
+    PUT sur `date_field`) reste, lui, toujours généré."""
+    from nova_compiler.codegen.ui_reflex import generate_frontend
+
+    src = """
+    entity Event {
+        field title: string required
+        field starts_at: date required
+        field price: float required
+    }
+    calendar C sur Event { champ_date: starts_at champ_titre: title }
+    """
+    program = parse_source(src)
+    files = generate_frontend(program)
+    main_src = next(v for k, v in files.items() if k.endswith(".py") and "custom" not in k and "rxconfig" not in k)
+    assert "def start_drag_new(self):" not in main_src
+    assert "Nouvel évènement" not in main_src
+    assert "async def drop_on_day(self, target_iso: str):" in main_src
+    assert "def start_drag_day(self, day_iso: str):" in main_src
+
+
+def test_calendar_quick_create_chip_omitted_when_entity_has_belongs_to():
+    """Même restriction que ci-dessus, pour une relation `appartient_a` :
+    la clé étrangère générée est requise et on n'a aucune valeur valable à
+    lui donner depuis un simple glisser-déposer."""
+    from nova_compiler.codegen.ui_reflex import generate_frontend
+
+    src = """
+    entity Category { field name: string required }
+    entity Event {
+        field title: string required
+        field starts_at: date required
+        belongs_to Category
+    }
+    calendar C sur Event { champ_date: starts_at champ_titre: title }
+    """
+    program = parse_source(src)
+    files = generate_frontend(program)
+    main_src = next(v for k, v in files.items() if k.endswith(".py") and "custom" not in k and "rxconfig" not in k)
+    assert "def start_drag_new(self):" not in main_src
+    assert "async def drop_on_day(self, target_iso: str):" in main_src
+
+
+def test_calendar_quick_create_chip_present_when_extra_field_has_default():
+    """Un champ requis avec une valeur par défaut ne bloque pas la création
+    rapide (le POST minimal reste valide sans lui, le backend appliquera
+    le défaut) — seul un champ requis SANS défaut est bloquant."""
+    from nova_compiler.codegen.ui_reflex import generate_frontend
+
+    src = """
+    entity Event {
+        field title: string required
+        field starts_at: date required
+        field status: string required default = "planned"
+    }
+    calendar C sur Event { champ_date: starts_at champ_titre: title }
+    """
+    program = parse_source(src)
+    files = generate_frontend(program)
+    main_src = next(v for k, v in files.items() if k.endswith(".py") and "custom" not in k and "rxconfig" not in k)
+    assert "def start_drag_new(self):" in main_src
+
+
+def test_calendar_quick_create_safe_helper_unit():
+    """Vérification directe de `_calendar_quick_create_safe` (pas seulement
+    via le code généré ci-dessus) : True quand `date_field`/`title_field`
+    sont les seuls champs requis et qu'il n'y a pas de relation
+    `appartient_a`, False sinon."""
+    from nova_compiler.ast_nodes import Calendar, Entity, Field, Relation
+    from nova_compiler.codegen.ui_reflex import _calendar_quick_create_safe
+
+    cal = Calendar(name="C", entity="Event", date_field="starts_at", title_field="title")
+
+    safe_entity = Entity(
+        name="Event",
+        fields=[
+            Field(name="title", type="string", required=True),
+            Field(name="starts_at", type="date", required=True),
+            Field(name="location", type="string", required=False),
+        ],
+    )
+    assert _calendar_quick_create_safe(safe_entity, cal) is True
+
+    unsafe_required = Entity(
+        name="Event",
+        fields=[
+            Field(name="title", type="string", required=True),
+            Field(name="starts_at", type="date", required=True),
+            Field(name="price", type="float", required=True),
+        ],
+    )
+    assert _calendar_quick_create_safe(unsafe_required, cal) is False
+
+    unsafe_relation = Entity(
+        name="Event",
+        fields=[
+            Field(name="title", type="string", required=True),
+            Field(name="starts_at", type="date", required=True),
+        ],
+        relations=[Relation(kind="belongs_to", target="Category")],
+    )
+    assert _calendar_quick_create_safe(unsafe_relation, cal) is False
+
+    safe_with_default = Entity(
+        name="Event",
+        fields=[
+            Field(name="title", type="string", required=True),
+            Field(name="starts_at", type="date", required=True),
+            Field(name="status", type="string", required=True, default="planned"),
+        ],
+    )
+    assert _calendar_quick_create_safe(safe_with_default, cal) is True
 
 
 def test_calendar_not_generated_without_calendar_block(tmp_path):

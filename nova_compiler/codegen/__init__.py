@@ -76,6 +76,18 @@ def generate_project(program: NovaProgram, output_dir: str | Path, source_dir: s
                     target = out / rel_path
                     target.write_bytes(candidate.read_bytes())
 
+    # `email { template: "..." }` (tâche #37) : même mécanisme que le `css`
+    # ci-dessus — si le fichier référencé existe bien à côté du .nova
+    # source, son contenu réel remplace le placeholder généré ci-dessus par
+    # generate_backend() à l'emplacement fixe attendu par emailer.py.
+    email_template_path = program.email.template if program.email else None
+    if email_template_path and source_dir is not None:
+        candidate = Path(source_dir) / email_template_path
+        if candidate.is_file():
+            target = out / "backend/app/email_templates/notification.html"
+            if target.exists():
+                target.write_bytes(candidate.read_bytes())
+
     scaffold_files: dict[str, str] = {}
     scaffold_files.update(generate_backend_scaffold_mongo() if is_mongo else generate_backend_scaffold())
     scaffold_files.update(generate_frontend_scaffold(program))

@@ -204,6 +204,33 @@ modèle de table SQLModel et sur les schémas `Create`/`Update` — l'API
 rejette une valeur invalide avec un `422` sans code de validation à
 écrire à la main.
 
+### Validation croisée entre champs (`validation`)
+
+Au-delà de `motif`/`pattern` (un seul champ), un bloc `validation <Nom>
+sur <Entité> { regle: <expression> <comparateur> <expression> message:
+"..." }` (une ou plusieurs règles) valide l'état complet de
+l'enregistrement à la création ET à la modification :
+
+```
+validation FactureCoherente sur Facture {
+  regle: prix_ttc == prix_ht + frais_port message: "Le TTC doit valoir HT + frais de port."
+  regle: min(prix_ht, remise) >= 0 message: "Le prix HT et la remise doivent être positifs ou nuls."
+}
+```
+
+Chaque `<expression>` peut être un simple champ, une constante, une
+combinaison par `+`/`-`, ou un appel de fonction : `min`, `max`
+(au moins 2 arguments), `round` (1 ou 2 arguments, arrondi façon Python),
+`abs` (1 argument) — au-delà de deux champs comparés directement, comme
+dans l'exemple ci-dessus. Un champ combiné par une fonction ou `+`/`-`
+doit être numérique (`entier`/`decimal`) ; un champ nu seul de chaque côté
+d'un opérateur d'ordre (`>`/`<`/`>=`/`<=`) peut en revanche être une
+`date`/`date_heure`. Si un des champs référencés est vide (optionnel non
+renseigné), la règle est silencieusement désactivée plutôt que de lever
+une erreur. Reste limité à des champs d'une même entité (pas de
+sous-requête, pas de comparaison avec un autre enregistrement) ; pour ça,
+`routers_custom/`.
+
 ### Base de données : moteur SQL configurable et backend NoSQL MongoDB
 
 Par défaut, le projet généré utilise **SQLite** (fichier local, aucune
@@ -242,16 +269,58 @@ traduite en index Mongo unique (`pymongo.errors.DuplicateKeyError`
 intercepté et renvoyé en `422`, comme le backend SQL). L'authentification
 JWT, les notifications email, l'upload de fichiers, le contenu
 multilingue, `belongs_to` et les graphiques sur entité sont **tous
-supportés** et réutilisent le code backend-agnostique existant. En
-revanche, dans ce MVP, `database: mongodb` est **incompatible** avec :
+supportés** et réutilisent le code backend-agnostique existant. Le bloc
+`requete`/`query` (filtres déclaratifs, tri, limite), le bloc
+`calendar`/`calendrier` (export `.ics` inclus) et les relations
+`has_many`/`possede_plusieurs` matérialisées (résumé texte sur
+`liste`/`obtenir`) sont **également supportés**, avec les mêmes routes
+que le backend SQL, portées vers l'API async Motor/Beanie. Seule
+exception : dans ce MVP, `database: mongodb` reste **incompatible** avec
+la **jointure explicite** (`jointure:`/`join:` dans un bloc `requete`) —
+absence de `JOIN` natif côté MongoDB, contrairement à SQL.
 
-- le bloc `requete`/`query` (filtres déclaratifs),
-- le bloc `calendar`/`calendrier`,
-- les relations `has_many`/`possede_plusieurs` matérialisées.
+Cette combinaison est détectée et rejetée **à la compilation** (erreur
+explicite nommant la ou les requêtes concernées) plutôt que de générer un
+projet Mongo silencieusement incomplet — au-delà, `routers_custom/`.
 
-Ces combinaisons sont détectées et rejetées **à la compilation** (erreur
-explicite listant le(s) bloc(s) en cause) plutôt que de générer un projet
-Mongo silencieusement incomplet — au-delà, `routers_custom/`.
+### Migrations de schéma (`nova migrate`)
+
+Pour un moteur **SQL** (pas MongoDB — voir ci-dessus, sans schéma figé à
+migrer), chaque projet généré embarque une structure
+[Alembic](https://alembic.sqlalchemy.org/) complète : `backend/alembic.ini`,
+`backend/migrations/env.py` (déjà câblé sur `app.database`/`app.models`,
+donc sur `NOVA_DATABASE_URL` au runtime — rien à configurer) et
+`backend/migrations/versions/`. Comme `routers_custom/` (voir plus bas),
+cette structure est générée **une seule fois** par `nova compile` : jamais
+réécrite ensuite, pour ne jamais perdre l'historique réel des révisions
+déjà appliquées en production.
+
+```
+nova migrate app.nova -o build -m "ajoute le champ prix"
+```
+
+Cette commande compile le projet (régénère `models.py` et le reste comme
+`nova compile`), puis exécute — dans `build/backend/` — un `alembic
+revision --autogenerate` (compare l'état actuel des modèles au dernier
+schéma connu et écrit une nouvelle révision dans `migrations/versions/`)
+suivi d'un `alembic upgrade head` (l'applique réellement à la base pointée
+par `NOVA_DATABASE_URL`). Comme pour `nova run` et `docker compose`,
+`alembic` doit être installé dans l'environnement Python qui exécute la
+commande `nova` elle-même (il l'est déjà dans `backend/requirements.txt`
+pour le déploiement).
+
+**À savoir en adoptant `nova migrate` sur un projet déjà démarré au moins
+une fois** : par défaut, `app/main.py` appelle `init_db()`
+(`SQLModel.metadata.create_all`) au démarrage, qui crée directement les
+tables manquantes sans passer par Alembic. Si la base cible a déjà été
+créée ainsi, la toute première `nova migrate` générerait une révision qui
+tenterait de recréer des tables déjà existantes (échec `table already
+exists`) — solution standard Alembic, pas spécifique à NOVA : lancez
+`alembic stamp head` une fois dans `backend/` pour marquer le schéma
+existant comme à jour sans le rejouer, puis utilisez `nova migrate`
+normalement pour la suite. Pour un tout nouveau projet, lancer `nova
+migrate` avant le tout premier démarrage de l'application évite le
+problème.
 
 ### Style et CSS
 
@@ -359,8 +428,28 @@ requete ProduitsAConsulter sur Produit {
 }
 ```
 
-Reste limité à une seule entité par requête (pas de jointure) ; pour
-des jointures ou une logique plus riche, `routers_custom/`.
+Une `jointure: <Entité> sur <local> = <distant>` (alias `join`/`union`/
+`verknüpfung`/`junção`) relie explicitement une autre entité — les champs
+de l'entité jointe se référencent alors avec le préfixe `<Entité>.` dans
+`filtre:`/`trier_par:` (un champ sans préfixe reste résolu contre
+l'entité principale, comportement historique inchangé) :
+
+```
+requete AccessoiresAvecProduit sur Accessoire {
+  jointure: Produit sur produit_id = Produit.id
+  filtre: Produit.prix > 100
+}
+```
+
+Chaque enregistrement de la réponse porte alors les champs de l'entité
+principale à plat, plus une clé nommée d'après l'entité jointe
+(`produit: { id, nom, prix, ... }`). Une seule jointure a été illustrée
+ci-dessus, mais plusieurs `jointure:` sont acceptées dans le même bloc
+(chacune pouvant référencer une entité déjà jointe, pas seulement
+l'entité principale). Reste limité aux jointures déclarées explicitement
+(pas d'inférence automatique depuis `appartient_a`/`possede_plusieurs`,
+même quand la relation existe déjà) ; pour une logique plus riche
+(agrégations, sous-requêtes), `routers_custom/`.
 
 ### Graphiques (`chart`)
 
@@ -395,14 +484,38 @@ chart TopProduitsChers sur ProduitsChers {
 
 Types disponibles (`type:`) : `bar`/`barres`, `line`/`ligne`,
 `pie`/`camembert`, `area`/`aire`, `radar`/`araignée`,
-`scatter`/`nuage_de_points` — chacun avec ses synonymes dans les 6
-langues. `axe_y` accepte plusieurs champs séparés par des virgules pour
-un graphique multi-séries (`axe_y: ventes, couts, marge`), sur les
-types qui s'y prêtent (`bar`/`line`/`area` — rejeté à la compilation
-sur `pie`/`radar`/`scatter`, qui n'ont pas de rendu multi-séries
-naturel). Une référence `sur` inconnue (ni entité ni requête) est
-détectée à la compilation (`nova check`/`nova compile`), pas au
-premier chargement de la page.
+`scatter`/`nuage_de_points`, `donut`/`anneau`, `funnel`/`entonnoir` —
+chacun avec ses synonymes dans les 6 langues. `axe_y` accepte plusieurs
+champs séparés par des virgules pour un graphique multi-séries
+(`axe_y: ventes, couts, marge`), sur les types qui s'y prêtent
+(`bar`/`line`/`area` — rejeté à la compilation sur
+`pie`/`radar`/`scatter`/`donut`/`funnel`, qui n'ont pas de rendu
+multi-séries naturel). Une référence `sur` inconnue (ni entité ni
+requête) est détectée à la compilation (`nova check`/`nova compile`),
+pas au premier chargement de la page.
+
+**Agrégation (`agregation`/`aggregation`)** : regroupe les lignes par
+`axe_x` puis agrège `axe_y` avec une fonction (`compte`/`count`,
+`somme`/`sum`, `moyenne`/`avg`, `min`, `max` — synonymes dans les 6
+langues), calculée côté frontend (aucune requête backend
+supplémentaire, juste un post-traitement en Python des lignes déjà
+reçues) :
+
+```
+chart NombreProduits sur Produit {
+  type: barres
+  axe_x: categorie
+  agregation: compte
+  titre: "Nombre de produits par catégorie"
+}
+```
+
+`compte`/`count` n'a pas besoin de `axe_y` (compte simplement les
+lignes de chaque groupe) ; les autres fonctions l'exigent (un champ
+numérique à agréger) — une valeur manquante ou non numérique dans
+`axe_y` est ignorée silencieusement plutôt que de faire échouer le
+calcul. Une fonction d'agrégation inconnue, ou une agrégation sans
+`axe_x`, est détectée à la compilation.
 
 ### Composants UI riches : upload, images, couleurs, pickers natifs
 
@@ -515,11 +628,35 @@ généré. Comportements à connaître :
   }
   ```
 
-  Le contenu du message (sujet + corps HTML bilingue mentionnant
-  l'entité et son id) reste généré automatiquement — pas de DSL pour
-  personnaliser le texte lui-même dans ce MVP ; pour un contenu
-  entièrement sur mesure, appelez `send_email(subject=..., body=...,
-  to=..., attachment_path=...)` depuis `routers_custom/`.
+  Par défaut, le contenu du message (sujet + corps HTML bilingue
+  mentionnant l'entité et son id) est généré automatiquement. Pour le
+  personnaliser sans toucher au code généré, `template`/`modele` sur le
+  bloc `email` référence un **fichier HTML externe**, résolu relativement
+  au fichier `.nova` source :
+
+  ```
+  email {
+    hote: "smtp.mailtrap.io"
+    modele: "email_notification.html"
+  }
+  ```
+
+  Ce fichier peut contenir des `{{champ}}` (nom de champ NOVA, ex.
+  `{{nom}}`, `{{prix}}`, ou `{{client_id}}` pour une référence
+  `belongs_to`) remplacés par la valeur correspondante de l'enregistrement
+  concerné au moment de l'envoi (`{{action}}` : `created`/`updated`/
+  `deleted`, et `{{entity}}` sont aussi disponibles) ; une balise
+  `<title>...</title>` dans le HTML (une fois les `{{...}}` substitués)
+  devient le sujet de l'email — sans `<title>`, un sujet générique
+  bilingue est utilisé. Le corps texte brut (repli `multipart/
+  alternative`) est dérivé automatiquement du HTML (balises retirées).
+  Comme pour `application { css: "..." }`, le fichier référencé est
+  copié tel quel au moment de la compilation (`nova compile`) ; s'il est
+  introuvable, un placeholder est généré à la place plutôt que de faire
+  échouer la compilation. Sans `template:`, le comportement historique
+  (sujet/corps codés en dur) est inchangé ; pour un contenu entièrement
+  programmatique, appelez `send_email(subject=..., body=..., to=...,
+  attachment_path=...)` depuis `routers_custom/`.
 
 ### Calendrier (`calendar`)
 
@@ -557,9 +694,24 @@ calendrier Ajouts sur Produit {
   `date`/`date_heure` de l'entité, ou un `champ_titre` inexistant sont
   détectés à la compilation (`nova check`/`nova compile`), jamais au
   premier chargement de la page.
-- Vue lecture seule dans ce MVP (pas de création/déplacement
-  d'événement par glisser-déposer directement sur la grille) — utilisez
-  la page `formulaire` de l'entité pour ajouter un enregistrement.
+- **Glisser-déposer** : en vue mois/semaine, chaque case-jour peut être
+  glissée sur une autre pour **déplacer** le premier événement de ce
+  jour (un `PUT` qui ne touche que `champ_date`, l'heure étant préservée
+  pour un champ `date_heure`) — toujours généré, aucune dépendance JS
+  supplémentaire (un `rx.el.div` HTML natif étendu des événements
+  `dragstart`/`dragover`/`drop`). Un chip « + Nouvel évènement » dans la
+  barre d'outils permet de **créer** un enregistrement en le déposant
+  sur un jour (un `POST` minimal : `champ_date` + `champ_titre` avec un
+  libellé par défaut) — généré uniquement quand c'est sûr, c'est-à-dire
+  quand l'entité n'a aucun autre champ requis sans valeur par défaut ni
+  relation `appartient_a` (sinon le chip est simplement omis, sans que
+  cela empêche le déplacement).
+
+  Les événements d'un même jour restent affichés en un seul texte joint
+  (`champ_titre` de chaque enregistrement, séparés par des virgules) :
+  le glisser-déposer porte donc sur la case-jour entière, pas sur un
+  événement individuel — si plusieurs enregistrements partagent le même
+  jour, seul le premier (même ordre que l'affichage) est déplacé.
 
 ### Contenu multilingue (`traductions` + champ `multilingue`)
 
@@ -703,33 +855,50 @@ serveur MongoDB simulé (`mongomock-motor`).
   valeurs jointes par virgule) plutôt qu'une simple mention informative
   — mais pas encore une sous-liste interactive d'objets complets ; pour
   ça, `frontend/<app>/custom.py`.
-- La validation `motif`/`pattern` reste limitée à un seul champ ; pour
-  une règle comparant deux champs entre eux, un bloc
-  `validation <Nom> sur <Entité> { regle: champA > champB message: "..."
-  }` (une ou plusieurs règles) est disponible depuis peu — au-delà d'une
-  comparaison directe entre deux champs (calcul, plus de deux champs),
-  `routers_custom/`.
-- Le bloc `requete`/`query` reste limité à une seule entité (pas de
-  jointure) ; au-delà, `routers_custom/`.
+- La validation `motif`/`pattern` reste limitée à un seul champ ; pour une
+  règle croisant plusieurs champs, un bloc `validation` (voir la section
+  dédiée ci-dessus) couvre désormais les comparaisons directes, les
+  fonctions `min`/`max`/`round`/`abs` et l'arithmétique `+`/`-` entre
+  plusieurs champs — au-delà (sous-requête, comparaison avec un autre
+  enregistrement), `routers_custom/`.
+- Le bloc `requete`/`query` couvre désormais les jointures explicites
+  (`jointure: <Entité> sur <local> = <distant>`, voir la section dédiée
+  ci-dessus) — reste limité aux jointures déclarées explicitement (pas
+  d'inférence automatique depuis les relations `appartient_a`/
+  `possede_plusieurs`) ; pour une logique plus riche (agrégations,
+  sous-requêtes), `routers_custom/`.
 - Le chart Helm génère ConfigMap/Secret/PVC et un `values.yaml` complet,
   mais reste un point de départ à adapter (registre d'images, ingress réel,
   autoscaling fin).
-- `database: mongodb` (backend NoSQL) est incompatible dans ce MVP avec
-  `requete`/`query`, `calendar`/`calendrier` et les relations `has_many`
-  matérialisées — rejeté explicitement à la compilation (voir la section
-  Base de données ci-dessus) plutôt que de générer un projet incomplet.
-- Le contenu HTML de l'email envoyé par `notifier:` (sujet + corps) reste
-  généré automatiquement — pas de DSL pour personnaliser le texte lui-même
-  dans ce MVP ; pour un contenu entièrement sur mesure, `routers_custom/`.
-- Le bloc `calendar` reste en lecture seule (pas de création/déplacement
-  d'événement par glisser-déposer directement sur la grille) ; pour une
-  interaction plus riche, `frontend/<app>/custom.py`.
+- `database: mongodb` (backend NoSQL) est incompatible dans ce MVP avec la
+  jointure explicite (`jointure:`/`join:` dans un bloc `requete`/`query`) —
+  rejeté explicitement à la compilation (voir la section Base de données
+  ci-dessus) plutôt que de générer un projet incomplet ; `requete`/`query`
+  sans jointure, `calendar`/`calendrier` et les relations `has_many`
+  matérialisées sont, elles, pleinement supportées côté Mongo.
+- Le contenu de l'email envoyé par `notifier:` (sujet + corps) peut
+  désormais être personnalisé via `template`/`modele` sur le bloc `email`
+  (fichier HTML externe avec `{{champ}}`, voir la section Notifications
+  par email ci-dessus) — reste un template unique par projet (pas un
+  template différent par action create/update/delete ni par entité) ; pour
+  un contenu entièrement sur mesure au-delà, `routers_custom/`.
+- Le glisser-déposer du bloc `calendar` porte sur la case-jour entière
+  (pas un événement individuel — voir la section Calendrier ci-dessus) :
+  si plusieurs enregistrements partagent le même jour, seul le premier
+  est déplacé ; pour une interaction plus riche (événement par
+  événement), `frontend/<app>/custom.py`.
 - Pas de traduction assistée/automatique pour le contenu multilingue
   (`traductions`, champ `multilingue`) — chaque texte, dans chacune des
   langues actives du projet, est saisi à la main dans le fichier `.nova`.
 - La pluralisation anglaise (`inflect`) ne couvre que l'anglais : un nom
   d'entité écrit dans une autre langue du DSL n'est pas pluralisé selon
   les règles de cette langue.
+- `nova migrate` (Alembic, voir la section Migrations de schéma
+  ci-dessus) et `init_db()` (`create_all` au démarrage de l'API) coexistent
+  sans être unifiés : sur une base déjà créée par `create_all`, la toute
+  première migration Alembic échoue tant que `alembic stamp head` n'a pas
+  été lancé une fois (voir cette même section) — comportement standard
+  Alembic, non automatisé par NOVA dans ce MVP.
 - Pas encore de NOVA Studio (IDE dédié), Marketplace, NOVA Cloud, NOVA AI
   — ce dépôt couvre le compilateur (Phase 1/2 de la feuille de route).
 
@@ -854,6 +1023,32 @@ Automatically generates a Pydantic `pattern=r"..."` constraint on the
 SQLModel table and on the `Create`/`Update` schemas — the API rejects an
 invalid value with a `422`, no hand-written validation code needed.
 
+### Cross-field validation (`validation`)
+
+Beyond `pattern`/`motif` (a single field), a `validation <Name> on
+<Entity> { rule: <expression> <comparator> <expression> message: "..." }`
+block (one or several rules) validates the whole record's state on both
+create and update:
+
+```
+validation InvoiceCoherent on Invoice {
+  rule: price_ttc == price_ht + shipping message: "TTC must equal HT + shipping."
+  rule: min(price_ht, discount) >= 0 message: "Price and discount must be zero or positive."
+}
+```
+
+Each `<expression>` can be a plain field, a constant, a `+`/`-`
+combination, or a function call: `min`, `max` (at least 2 arguments),
+`round` (1 or 2 arguments, Python-style rounding), `abs` (1 argument) —
+beyond a direct comparison between two fields, as shown above. A field
+combined via a function or `+`/`-` must be numeric (`int`/`decimal`); a
+plain field alone on each side of an ordering operator (`>`/`<`/`>=`/
+`<=`) can, however, be a `date`/`datetime`. If a referenced field is
+empty (an optional field left unset), the rule is silently skipped
+rather than raising an error. Still limited to fields of the same entity
+(no subquery, no comparison against another record); for that,
+`routers_custom/`.
+
 ### Database: configurable SQL engine and NoSQL MongoDB backend
 
 By default the generated project uses **SQLite** (a local file, no
@@ -890,16 +1085,59 @@ auto-incrementing integers, `unique` constraints translated into a
 unique Mongo index (`pymongo.errors.DuplicateKeyError` caught and turned
 into a `422`, matching the SQL backend). JWT auth, email notifications,
 file uploads, multilingual content, `belongs_to` and entity charts are
-**all supported** and reuse the existing backend-agnostic code. However,
-in this MVP, `database: mongodb` is **incompatible** with:
+**all supported** and reuse the existing backend-agnostic code. The
+`query`/`requete` block (declarative filters, sorting, limit), the
+`calendar`/`calendrier` block (`.ics` export included), and materialized
+`has_many`/`possede_plusieurs` relations (text summary on `list`/`get`)
+are **also supported**, exposing the same routes as the SQL backend,
+ported to the async Motor/Beanie API. The one exception: in this MVP,
+`database: mongodb` remains **incompatible** with **explicit joins**
+(`jointure:`/`join:` inside a `query` block) — MongoDB has no native
+`JOIN`, unlike SQL.
 
-- the `query`/`requete` block (declarative filters),
-- the `calendar`/`calendrier` block,
-- materialized `has_many`/`possede_plusieurs` relations.
+This combination is detected and rejected **at compile time** (a clear
+error naming the offending quer(y/ies)) instead of silently generating
+an incomplete Mongo project — beyond that, `routers_custom/`.
 
-These combinations are detected and rejected **at compile time** (a
-clear error listing the offending block(s)) instead of silently
-generating an incomplete Mongo project — beyond that, `routers_custom/`.
+### Schema migrations (`nova migrate`)
+
+For a **SQL** engine (not MongoDB — see above, no fixed schema to
+migrate), every generated project ships a complete
+[Alembic](https://alembic.sqlalchemy.org/) structure:
+`backend/alembic.ini`, `backend/migrations/env.py` (already wired to
+`app.database`/`app.models`, so to `NOVA_DATABASE_URL` at runtime —
+nothing to configure) and `backend/migrations/versions/`. Just like
+`routers_custom/` (see below), this structure is generated **once** by
+`nova compile`: never rewritten afterward, so the real history of
+revisions already applied in production is never lost.
+
+```
+nova migrate app.nova -o build -m "add the price field"
+```
+
+This command compiles the project (regenerates `models.py` and
+everything else, just like `nova compile`), then runs — inside
+`build/backend/` — an `alembic revision --autogenerate` (compares the
+current models against the last known schema and writes a new revision
+into `migrations/versions/`) followed by an `alembic upgrade head`
+(actually applies it to the database pointed to by
+`NOVA_DATABASE_URL`). Just like `nova run` and `docker compose`,
+`alembic` must be installed in the Python environment running the `nova`
+command itself (it already is in `backend/requirements.txt` for
+deployment).
+
+**Worth knowing when adopting `nova migrate` on a project already
+started at least once**: by default, `app/main.py` calls `init_db()`
+(`SQLModel.metadata.create_all`) at startup, which creates missing
+tables directly without going through Alembic. If the target database
+was already created that way, the very first `nova migrate` would
+generate a revision trying to recreate tables that already exist
+(`table already exists` failure) — a standard Alembic gotcha, not
+specific to NOVA: run `alembic stamp head` once in `backend/` to mark
+the existing schema as up to date without replaying it, then use `nova
+migrate` normally from there on. For a brand-new project, running `nova
+migrate` before the very first application startup avoids the issue
+entirely.
 
 ### Style and CSS
 
@@ -1006,8 +1244,28 @@ query ProductsToCheck on Product {
 }
 ```
 
-Still limited to a single entity per query (no joins); for joins or
-richer logic, `routers_custom/` remains the intended extension point.
+A `join: <Entity> on <local> = <remote>` (alias `jointure`/`union`/
+`verknüpfung`/`junção`) explicitly links another entity — fields of the
+joined entity are then referenced with an `<Entity>.` prefix in
+`filter:`/`sort_by:` (an unprefixed field still resolves against the
+main entity, unchanged from before):
+
+```
+query PartsWithProduct on Part {
+  join: Product on product_id = Product.id
+  filter: Product.price > 100
+}
+```
+
+Each row in the response then carries the main entity's own fields
+flat, plus one key named after the joined entity
+(`product: { id, name, price, ... }`). A single join is shown above, but
+several `join:`/`jointure:` statements are accepted in the same block
+(each may reference an already-joined entity, not just the main one).
+Still limited to explicitly declared joins (no automatic inference from
+`belongs_to`/`has_many`, even when that relation already exists); for
+richer logic (aggregations, subqueries), `routers_custom/` remains the
+intended extension point.
 
 ### Charts (`chart`)
 
@@ -1040,14 +1298,36 @@ chart TopExpensive on ExpensiveProducts {
 ```
 
 Available types (`type:`): `bar`/`barres`, `line`/`ligne`,
-`pie`/`camembert`, `area`/`aire`, `radar`, `scatter`/`nuage_de_points`
-— each with synonyms in all 6 languages. `y_axis` accepts several
-comma-separated fields for a multi-series chart (`y_axis: sales, costs,
-margin`), on the types that support it (`bar`/`line`/`area` — rejected
-at compile time on `pie`/`radar`/`scatter`, which have no natural
+`pie`/`camembert`, `area`/`aire`, `radar`, `scatter`/`nuage_de_points`,
+`donut`, `funnel` — each with synonyms in all 6 languages. `y_axis`
+accepts several comma-separated fields for a multi-series chart
+(`y_axis: sales, costs, margin`), on the types that support it
+(`bar`/`line`/`area` — rejected at compile time on
+`pie`/`radar`/`scatter`/`donut`/`funnel`, which have no natural
 multi-series rendering). An unknown `on`/`sur` reference (neither an
 entity nor a query) is caught at compile time (`nova check`/`nova
 compile`), not on the page's first load.
+
+**Aggregation (`aggregation`/`agregation`)**: groups rows by `x_axis`
+then aggregates `y_axis` with a function (`count`, `sum`, `avg`, `min`,
+`max` — synonyms in all 6 languages), computed on the frontend side (no
+extra backend query, just a Python post-processing step over the rows
+already fetched):
+
+```
+chart ProductCount on Product {
+  type: bar
+  x_axis: category
+  aggregation: count
+  title: "Number of products per category"
+}
+```
+
+`count` doesn't need `y_axis` (it simply counts each group's rows); the
+other functions require it (a numeric field to aggregate) — a missing
+or non-numeric `y_axis` value is silently skipped rather than failing
+the computation. An unknown aggregation function, or an aggregation
+without `x_axis`, is caught at compile time.
 
 ### Rich UI components: upload, images, colors, native pickers
 
@@ -1156,11 +1436,34 @@ know about:
   }
   ```
 
-  The message content itself (subject + bilingual HTML body mentioning
-  the entity and its id) is still automatically generated — no DSL to
-  customize the text itself in this MVP; for fully custom content, call
-  `send_email(subject=..., body=..., to=..., attachment_path=...)` from
-  `routers_custom/`.
+  By default, the message content (subject + bilingual HTML body
+  mentioning the entity and its id) is generated automatically. To
+  customize it without touching generated code, `template` (alias
+  `modele`) on the `email` block references an **external HTML file**,
+  resolved relative to the source `.nova` file:
+
+  ```
+  email {
+    host: "smtp.mailtrap.io"
+    template: "email_notification.html"
+  }
+  ```
+
+  That file can contain `{{field}}` placeholders (a NOVA field name,
+  e.g. `{{name}}`, `{{price}}`, or `{{customer_id}}` for a `belongs_to`
+  reference), replaced with the corresponding value of the record
+  concerned at send time (`{{action}}`: `created`/`updated`/`deleted`,
+  and `{{entity}}` are also available); a `<title>...</title>` tag in the
+  HTML (once `{{...}}` placeholders are substituted) becomes the email
+  subject — without a `<title>`, a generic bilingual subject is used.
+  The plain-text fallback body (`multipart/alternative`) is derived
+  automatically from the HTML (tags stripped). Just like `application {
+  css: "..." }`, the referenced file is copied as-is at compile time
+  (`nova compile`); if it can't be found, a placeholder is generated
+  instead of failing the build. Without `template:`, the historical
+  behavior (hardcoded subject/body) is unchanged; for fully programmatic
+  content, call `send_email(subject=..., body=..., to=...,
+  attachment_path=...)` from `routers_custom/`.
 
 ### Calendar (`calendar`)
 
@@ -1196,9 +1499,23 @@ calendar Additions on Product {
   `date`/`datetime` field of the entity, or a nonexistent
   `title_field` are all caught at compile time (`nova check`/`nova
   compile`), never on first page load.
-- Read-only view in this MVP (no drag-and-drop event creation/moving
-  directly on the grid) — use the entity's `form` page to add a
-  record.
+- **Drag-and-drop**: in month/week view, any day cell can be dragged
+  onto another to **move** that day's first event (a `PUT` touching
+  only `date_field`, preserving the time of day for a `datetime`
+  field) — always generated, no extra JS dependency (a native
+  `rx.el.div` extended with `dragstart`/`dragover`/`drop` events). A
+  "+ New event" chip in the toolbar lets you **create** a record by
+  dropping it on a day (a minimal `POST`: `date_field` + `title_field`
+  with a default label) — generated only when it's safe, meaning the
+  entity has no other required field without a default and no
+  `belongs_to` relation (otherwise the chip is simply omitted, without
+  affecting the move behavior).
+
+  Since a day's events are still shown as one joined text
+  (`title_field` from every record on that day, comma-separated),
+  drag-and-drop operates on the whole day cell, not an individual
+  event — if several records share the same day, only the first
+  (same order as the display) is moved.
 
 ### Multilingual content (`translations` + `multilingual` field)
 
@@ -1338,32 +1655,47 @@ with a mocked MongoDB server (`mongomock-motor`).
   linked records (`<entity>_text`, comma-joined values) rather than a
   bare mention — but not yet an interactive sub-list of full objects;
   for that, `frontend/<app>/custom.py`.
-- `pattern`/`motif` validation still covers a single field at a time; a
-  rule comparing two fields is available via a `validation <Name> on
-  <Entity> { rule: fieldA > fieldB message: "..." }` block (one or more
-  rules) — beyond a direct two-field comparison (computed values, more
-  than two fields), `routers_custom/`.
-- The `query`/`requete` block is still limited to a single entity (no
-  joins); beyond that, `routers_custom/`.
+- `pattern`/`motif` validation still covers a single field at a time; for
+  a rule crossing several fields, a `validation` block (see the dedicated
+  section above) now covers direct comparisons, `min`/`max`/`round`/`abs`
+  functions and `+`/`-` arithmetic across several fields — beyond that
+  (subquery, comparison against another record), `routers_custom/`.
+- The `query`/`requete` block now covers explicit joins (`join: <Entity>
+  on <local> = <remote>`, see the dedicated section above) — still
+  limited to explicitly declared joins (no automatic inference from
+  `belongs_to`/`has_many` relations); for richer logic (aggregations,
+  subqueries), `routers_custom/`.
 - The Helm chart generates a ConfigMap/Secret/PVC and a full
   `values.yaml`, but remains a starting point to adapt (image registry,
   real ingress, fine-grained autoscaling).
 - `database: mongodb` (NoSQL backend) is incompatible in this MVP with
-  `query`/`requete`, `calendar`/`calendrier` and materialized `has_many`
-  relations — explicitly rejected at compile time (see the Database
-  section above) rather than generating an incomplete project.
-- The HTML content (subject + body) of the `notifier:` email is still
-  automatically generated — no DSL to customize the text itself in this
-  MVP; for fully custom content, `routers_custom/`.
-- The `calendar` block stays read-only (no drag-and-drop event
-  creation/moving directly on the grid); for richer interaction,
-  `frontend/<app>/custom.py`.
+  explicit joins (`jointure:`/`join:` inside a `query`/`requete` block) —
+  explicitly rejected at compile time (see the Database section above)
+  rather than generating an incomplete project; `query`/`requete` without
+  a join, `calendar`/`calendrier`, and materialized `has_many` relations
+  are all fully supported on Mongo.
+- The content of the `notifier:` email (subject + body) can now be
+  customized via `template` (alias `modele`) on the `email` block
+  (external HTML file with `{{field}}` placeholders, see the Email
+  notifications section above) — still a single template per project
+  (not one per create/update/delete action, nor per entity); for fully
+  custom content beyond that, `routers_custom/`.
+- The `calendar` block's drag-and-drop operates on the whole day cell
+  (not an individual event — see the Calendar section above): if
+  several records share the same day, only the first one is moved; for
+  richer, event-by-event interaction, `frontend/<app>/custom.py`.
 - No machine/assisted translation for multilingual content
   (`translations`, `multilingual` field) — every text, in each of the
   project's active languages, is still hand-entered in the `.nova` file.
 - English pluralization (`inflect`) only covers English: an entity name
   written in another DSL language isn't pluralized by that language's
   rules.
+- `nova migrate` (Alembic, see the Schema migrations section above) and
+  `init_db()` (`create_all` at API startup) coexist without being
+  unified: on a database already created by `create_all`, the very first
+  Alembic migration fails until `alembic stamp head` has been run once
+  (see that same section) — standard Alembic behavior, not automated by
+  NOVA in this MVP.
 - Not yet included: NOVA Studio (dedicated IDE), Marketplace, NOVA
   Cloud, NOVA AI — this repo covers the compiler (roadmap Phase 1/2).
 

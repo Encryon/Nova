@@ -19,6 +19,12 @@ runtime = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "sqlmodel>=0.0.16",
+    # `nova migrate` (tâche #38, cli.py) shell-e vers `python -m alembic` :
+    # doit être importable dans le même environnement Python que la
+    # commande `nova` elle-même (comme `docker compose` doit être installé
+    # à côté pour `nova run`) — pas seulement dans le `requirements.txt` du
+    # backend généré (déjà le cas, voir codegen/api_fastapi.py).
+    "alembic>=1.13",
     "reflex>=0.5",
     "bcrypt>=4.0",
     "python-jose[cryptography]>=3.3",

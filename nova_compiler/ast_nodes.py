@@ -123,12 +123,28 @@ class QueryFilterGroup:
 
 
 @dataclass
+class QueryJoin:
+    """`jointure: <Entite> sur <local> = <distant>` dans un `requete`/
+    `query` (voir Query.joins ci-dessous) : jointure explicite, indépendante
+    des relations belongs_to/has_many déjà déclarées. `entity` est le nom
+    de l'entité jointe ; `local_field`/`remote_field` sont des chaînes
+    éventuellement qualifiées (`"Commande.client_id"`/`"client_id"`) —
+    voir codegen/api_fastapi.py::_resolve_query_field pour leur résolution
+    contre l'entité principale de la requête ou une entité déjà jointe."""
+    entity: str
+    local_field: str
+    remote_field: str
+
+
+@dataclass
 class Query:
     """Bloc `requete <Nom> sur <Entite> { ... }` : requête déclarative
-    au-delà du CRUD simple (filtre/tri/limite), sans SQL à écrire.
+    au-delà du CRUD simple (filtre/tri/limite/jointure), sans SQL à écrire.
     `filters` (premier niveau) sont toujours combinés par ET entre eux et
     avec chaque groupe de `filter_groups` (`ou: { ... }`) ; à l'intérieur
-    d'un même groupe, les filtres sont combinés par OU."""
+    d'un même groupe, les filtres sont combinés par OU. `filters`/`order_by`
+    peuvent référencer un champ qualifié (`"Client.pays"`) d'une entité
+    listée dans `joins` plutôt que de l'entité principale `entity`."""
     name: str
     entity: str
     filters: list[QueryFilter] = field(default_factory=list)
@@ -136,6 +152,7 @@ class Query:
     order_by: Optional[str] = None
     order_dir: str = "asc"                      # "asc" | "desc"
     limit: Optional[int] = None
+    joins: list[QueryJoin] = field(default_factory=list)
 
 
 @dataclass
@@ -151,6 +168,7 @@ class Chart:
     y_field: Optional[str] = None      # première (ou unique) série — conservé pour compatibilité
     y_fields: list = field(default_factory=list)  # toutes les séries (multi-séries bar/line/area)
     title: Optional[str] = None
+    aggregation: Optional[str] = None  # "count" | "sum" | "avg" | "min" | "max" (tâche #35)
 
 
 @dataclass
@@ -167,16 +185,44 @@ class Email:
     from_addr: str = ""
     to_addr: str = ""
     tls: bool = True
+    # `template`/`modele` (tâche #37) : chemin d'un fichier .html externe
+    # (résolu relativement au .nova source, comme `application { css }`)
+    # utilisé pour le sujet/corps HTML des notifications `notifier:` à la
+    # place du gabarit généré automatiquement — voir codegen/api_fastapi.py
+    # ::_generate_emailer. None = comportement historique inchangé.
+    template: Optional[str] = None
+
+
+@dataclass
+class ValidationExpr:
+    """Un côté d'une comparaison dans une règle `validation` (voir
+    `ValidationRule` ci-dessous) — mini-langage d'expression :
+    - `kind="field"` : un champ nu de l'entité (`value` = son nom).
+    - `kind="number"` : une constante numérique (`value` = int/float).
+    - `kind="call"` : un appel de fonction whitelist (`value` = nom
+      canonique parmi `keywords.VALIDATION_FUNCTIONS` — `min`/`max`/
+      `round`/`abs`, chacun mappé directement sur la fonction Python native
+      de même nom), `args` = ses arguments (d'autres ValidationExpr).
+    - `kind="binop"` : une somme/différence de deux expressions (`value` =
+      "+"/"-", `args` = [gauche, droite]).
+    Permet des règles comme `regle: min(prix_ht, prix_promo) > 0` ou
+    `regle: prix_ttc == prix_ht + frais_port message: "..."` — au-delà de
+    la simple comparaison directe entre deux champs du MVP précédent."""
+    kind: str
+    value: Union[str, int, float, None] = None
+    args: list["ValidationExpr"] = field(default_factory=list)
 
 
 @dataclass
 class ValidationRule:
-    """Une règle d'un bloc `validation` : compare DEUX champs d'une même
-    entité entre eux (`field_a <op> field_b`), avec son propre message
-    d'erreur — voir `Validation` ci-dessous."""
-    field_a: str
+    """Une règle d'un bloc `validation` : compare deux expressions
+    (`expr_a <op> expr_b`, voir `ValidationExpr` ci-dessus — chacune peut
+    être un simple champ, comme dans le MVP précédent, ou une expression
+    plus riche), avec son propre message d'erreur — voir `Validation`
+    ci-dessous."""
+    expr_a: ValidationExpr
     op: str                                    # ">" | "<" | ">=" | "<=" | "==" | "!="
-    field_b: str
+    expr_b: ValidationExpr
     message: str
 
 

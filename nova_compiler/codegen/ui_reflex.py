@@ -137,6 +137,58 @@ _CHART_COLOR = "#7c66dc"  # violet, cohérent avec le thème accent_color="viole
 # l'ajout du multi-séries. Cycle si plus de séries que de couleurs.
 _CHART_PALETTE = [_CHART_COLOR, "#f5a623", "#50c878", "#e35d6a", "#4a90d9", "#f0c419"]
 
+# Helper module-level, émis une seule fois dans app.py si au moins un
+# `chart` déclare `agregation:`/`aggregation:` (tâche #35) — appelé depuis
+# `load_rows()` de chaque état de graphique concerné pour remplacer les
+# lignes brutes reçues du backend par des lignes regroupées/agrégées, AVANT
+# de les stocker dans `self.rows` : le reste du générateur (data_key=x_key/
+# y_key posés sur les composants rx.recharts) n'a donc besoin d'aucun
+# changement, qu'un graphique agrège ou non.
+_CHART_AGGREGATE_HELPER = '''
+def _nova_chart_aggregate(rows: list[dict], x_key: str, y_keys: list[str], agg: str) -> list[dict]:
+    """Regroupe `rows` par `x_key` puis agrège chaque champ de `y_keys` avec
+    `agg` ("count"/"sum"/"avg"/"min"/"max") — voir la propriété
+    `agregation`/`aggregation` du bloc `chart` (README, section Chart).
+    "count" ignore la valeur des champs et compte les lignes du groupe (sous
+    la clé du premier `y_keys`, ou "count" si aucun) ; les autres agrégations
+    convertissent chaque valeur en float, en ignorant silencieusement les
+    valeurs manquantes ou non numériques."""
+    groups: dict = {}
+    order: list = []
+    for row in rows:
+        key = row.get(x_key)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+    result = []
+    for key in order:
+        group_rows = groups[key]
+        out = {x_key: key}
+        if agg == "count":
+            count_key = y_keys[0] if y_keys else "count"
+            out[count_key] = len(group_rows)
+        else:
+            for y_key in y_keys:
+                values = []
+                for r in group_rows:
+                    v = r.get(y_key)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        values.append(float(v))
+                if not values:
+                    out[y_key] = None
+                elif agg == "sum":
+                    out[y_key] = sum(values)
+                elif agg == "avg":
+                    out[y_key] = sum(values) / len(values)
+                elif agg == "min":
+                    out[y_key] = min(values)
+                elif agg == "max":
+                    out[y_key] = max(values)
+        result.append(out)
+    return result
+'''
+
 
 def _chart_state_class_name(chart: Chart) -> str:
     return f"{to_pascal_case(chart.name)}ChartState"
@@ -180,6 +232,11 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
     state_cls = _chart_state_class_name(chart)
     url_path, is_protected = _chart_data_source(program, chart, has_auth)
 
+    title = chart.title or chart.name
+    x_key = chart.x_field or "x"
+    y_key = chart.y_field or "y"
+    y_keys = chart.y_fields or ([y_key] if y_key else [])
+
     auth_header_lines = []
     if is_protected:
         auth_header_lines = [
@@ -187,6 +244,21 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
             '        headers = {"Authorization": f"Bearer {auth_state.token}"} if auth_state.token else {}',
         ]
     headers_kwarg = ", headers=headers" if is_protected else ""
+
+    # `agregation:`/`aggregation:` (tâche #35) : les lignes brutes reçues du
+    # backend sont regroupées par `x_key` et agrégées via le helper
+    # module-level `_nova_chart_aggregate` (voir _CHART_AGGREGATE_HELPER,
+    # émis une seule fois dans app.py par `generate_frontend` si au moins un
+    # chart du programme agrège) AVANT d'être stockées dans `self.rows` — le
+    # rendu rx.recharts plus bas ne voit donc aucune différence entre un
+    # chart agrégé ou non.
+    if chart.aggregation:
+        assign_rows_line = (
+            "                self.rows = _nova_chart_aggregate("
+            f'resp.json(), "{x_key}", {y_keys!r}, "{chart.aggregation}")'
+        )
+    else:
+        assign_rows_line = "                self.rows = resp.json()"
 
     state_lines = [
         f"class {state_cls}(rx.State):",
@@ -203,16 +275,11 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
         "        async with httpx.AsyncClient() as client:",
         f'            resp = await client.get(f"{{BACKEND_URL}}/{url_path}"{headers_kwarg})',
         "            if resp.status_code == 200:",
-        "                self.rows = resp.json()",
+        assign_rows_line,
         "        self.is_loading = False",
         "",
     ]
     state_code = "\n".join(state_lines) + "\n"
-
-    title = chart.title or chart.name
-    x_key = chart.x_field or "x"
-    y_key = chart.y_field or "y"
-    y_keys = chart.y_fields or ([y_key] if y_key else [])
 
     if chart.type == "pie":
         # La donnée du camembert se pose sur le sous-composant `pie`, pas sur
@@ -224,6 +291,37 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
             f'fill="{_CHART_COLOR}"),\n'
             "    rx.recharts.graphing_tooltip(),\n"
             "    rx.recharts.legend(),\n"
+            '    width="100%",\n'
+            "    height=360,\n"
+            ")"
+        )
+    elif chart.type == "donut":
+        # Nouveau type (tâche #35) : même composant que "pie" (la donnée se
+        # pose sur `pie`, pas `pie_chart`), avec `inner_radius`/`outer_radius`
+        # pour l'anneau creux au centre — vérifié par construction réelle
+        # (rx.recharts.pie(..., inner_radius=60, outer_radius=100)) avant
+        # d'écrire ce générateur, comme les autres types.
+        chart_component = (
+            "rx.recharts.pie_chart(\n"
+            f'    rx.recharts.pie(data={state_cls}.rows, data_key="{y_key}", name_key="{x_key}", '
+            f'fill="{_CHART_COLOR}", inner_radius=60, outer_radius=100),\n'
+            "    rx.recharts.graphing_tooltip(),\n"
+            "    rx.recharts.legend(),\n"
+            '    width="100%",\n'
+            "    height=360,\n"
+            ")"
+        )
+    elif chart.type == "funnel":
+        # Nouveau type (tâche #35) : `rx.recharts.funnel_chart` + sous-
+        # composant `funnel` (comme "pie"/"scatter", la donnée se pose sur le
+        # sous-composant) — vérifié par construction réelle avant d'écrire ce
+        # générateur. Un seul champ toujours ici : pas de rendu multi-séries
+        # simple pour l'entonnoir, voir _validate_charts/kw.CHART_MULTI_SERIES_TYPES.
+        chart_component = (
+            "rx.recharts.funnel_chart(\n"
+            f'    rx.recharts.funnel(data={state_cls}.rows, data_key="{y_key}", name_key="{x_key}", '
+            f'fill="{_CHART_COLOR}"),\n'
+            "    rx.recharts.graphing_tooltip(),\n"
             '    width="100%",\n'
             "    height=360,\n"
             ")"
@@ -318,6 +416,56 @@ def _generate_chart_state_and_view(chart: Chart, program: NovaProgram, has_auth:
 _WEEKDAY_LABELS = ["Lun/Mon", "Mar/Tue", "Mer/Wed", "Jeu/Thu", "Ven/Fri", "Sam/Sat", "Dim/Sun"]
 
 
+# Composant module-level, émis une seule fois dans app.py dès que
+# `program.calendars` est non vide (tâche #36, glisser-déposer) : `rx.el.div`
+# natif n'expose par défaut que les évènements souris/clavier/focus standards
+# (voir l'erreur "Valid triggers for Div" rencontrée en construisant ce
+# générateur) — PAS `on_drag_start`/`on_drag_over`/`on_drop`. Ce sous-
+# classement minimal (toujours du HTML natif, aucune dépendance JS
+# supplémentaire) est la façon documentée par Reflex d'ajouter un
+# déclencheur d'événement à un composant existant
+# (https://reflex.dev/docs/wrapping-react/guide/#event-triggers), vérifié
+# par construction réelle avant d'écrire ce générateur (comme les types de
+# `chart`). Utilisé pour les cellules-jour du calendrier (déplacer un
+# événement d'un jour à l'autre) et pour le chip "+ Nouvel évènement" du
+# calendrier (créer un événement en le déposant sur un jour).
+_CALENDAR_DND_HELPER = '''
+class NovaDnd(rx.el.Div):
+    def get_event_triggers(self):
+        return {
+            **super().get_event_triggers(),
+            "on_drag_start": lambda e: [],
+            "on_drag_over": lambda e: [],
+            "on_drop": lambda e: [],
+        }
+'''
+
+
+def _calendar_quick_create_safe(entity, cal: Calendar) -> bool:
+    """Le chip "+ Nouvel évènement" (création par glisser-déposer, tâche
+    #36) envoie un POST minimal — seulement `date_field` (+ `title_field`
+    s'il est déclaré, toujours rempli avec un libellé par défaut). C'est
+    sûr uniquement si AUCUN autre champ de l'entité n'est à la fois requis
+    ET sans valeur par défaut (le POST échouerait sinon en 422), et si
+    l'entité ne porte aucune relation `appartient_a`/`belongs_to` (la clé
+    étrangère générée est requise, et on n'a aucune valeur valable à lui
+    donner). Décision prise une fois à la génération (pas au runtime) :
+    si ce n'est pas sûr, le chip de création rapide est simplement omis —
+    le déplacement d'événement (toujours sûr, un PUT ne touche que
+    `date_field`) reste, lui, toujours généré. Même philosophie de
+    restriction explicite et documentée que la jointure MongoDB (tâche
+    #34) plutôt qu'un projet généré qui échouerait silencieusement."""
+    if any(r.kind == "belongs_to" for r in entity.relations):
+        return False
+    exempt = {cal.date_field, cal.title_field}
+    for f in entity.fields:
+        if f.name in exempt:
+            continue
+        if f.required and f.default is None:
+            return False
+    return True
+
+
 def _calendar_state_class_name(cal: Calendar) -> str:
     return f"{to_pascal_case(cal.name)}CalendarState"
 
@@ -356,22 +504,37 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
     (`_build_day_events`) — via la seule stdlib (`calendar.Calendar.
     monthdatescalendar` + `datetime.date`/`timedelta` — aucune dépendance JS
     supplémentaire, conformément au choix de conception retenu pour cette
-    fonctionnalité, ET explicitement SANS glisser-déposer d'événement,
-    conformément à la décision explicite prise pour cette extension : vue
-    semaine/jour + export iCal, mais pas de drag & drop). `self.view`
-    ("month"/"week"/"day") sélectionne la vue active ; `rx.match` choisit le
-    composant à afficher — voir `inner` plus bas. Chaque jour est un dict
-    PLAT (`date`, `day`, `in_month`, `events_text`) plutôt qu'un dict
-    contenant une liste imbriquée d'événements : `rx.foreach` niché sur une
-    valeur `list[str]` à l'intérieur d'un state var `list[dict]` lève
-    `ForeachVarError` (bug réel rencontré et corrigé pendant la conception
-    de ce bloc `calendar`) — d'où `events_text`, les titres des événements
-    du jour déjà joints en une seule chaîne (même principe pour
-    `week_days`/`day_events`)."""
+    fonctionnalité). `self.view` ("month"/"week"/"day") sélectionne la vue
+    active ; `rx.match` choisit le composant à afficher — voir `inner` plus
+    bas. Chaque jour est un dict PLAT (`date`, `day`, `in_month`,
+    `events_text`) plutôt qu'un dict contenant une liste imbriquée
+    d'événements : `rx.foreach` niché sur une valeur `list[str]`/`list[dict]`
+    à l'intérieur d'un state var `list[dict]` lève `ForeachVarError` (bug
+    réel rencontré et corrigé pendant la conception de ce bloc `calendar`,
+    reconfirmé en développant le glisser-déposer tâche #36 : impossible
+    d'avoir des chips d'événement individuels imbriqués dans le foreach des
+    jours) — d'où `events_text`, les titres des événements du jour déjà
+    joints en une seule chaîne (même principe pour `week_days`/`day_events`).
+
+    Glisser-déposer (tâche #36) : conséquence directe de la limitation
+    ci-dessus, le drag & drop porte sur la CELLULE-JOUR entière (via
+    `NovaDnd`, voir `_CALENDAR_DND_HELPER`), pas sur un événement individuel
+    — déposer un jour sur un autre déplace le PREMIER événement trouvé du
+    jour source (même ordre que `events_text`/`_build_day_events`) vers le
+    jour cible (`PUT` sur `date_field` uniquement, en préservant l'heure
+    pour un champ `date_heure`/`datetime`). Un chip "+ Nouvel évènement"
+    dans la barre d'outils permet de CRÉER un événement en le déposant sur
+    un jour (`POST` avec seulement `date_field` + `title_field` par
+    défaut) — généré uniquement quand c'est sûr, voir
+    `_calendar_quick_create_safe`."""
     state_cls = _calendar_state_class_name(cal)
     url_path, is_protected = _calendar_data_source(program, cal, has_auth)
     date_field_snake = to_snake_case(cal.date_field)
     title_field_snake = to_snake_case(cal.title_field) if cal.title_field else None
+    entity = program.get_entity(cal.entity)
+    date_field_obj = next((f for f in entity.fields if f.name == cal.date_field), None) if entity else None
+    is_datetime = bool(date_field_obj and date_field_obj.type == "datetime")
+    quick_create_safe = bool(entity) and _calendar_quick_create_safe(entity, cal)
 
     auth_header_lines = []
     if is_protected:
@@ -400,6 +563,7 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         '    selected_day: str = ""',
         '    view: str = "month"    # "month" | "week" | "day"',
         '    label: str = ""',
+        '    dragging: str = ""    # date ISO du jour source, ou "__new__" (tâche #36)',
         "    is_loading: bool = False",
         "",
         "    async def load_rows(self):",
@@ -505,32 +669,119 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         "            self.selected_day = (date.fromisoformat(self.selected_day) + timedelta(days=1)).isoformat()",
         "            self._build_day_events()",
         "",
+        "    def start_drag_day(self, day_iso: str):",
+        "        self.dragging = day_iso",
+        "",
+    ]
+    if quick_create_safe:
+        state_lines += [
+            "    def start_drag_new(self):",
+            '        self.dragging = "__new__"',
+            "",
+        ]
+    new_value_expr = 'target_iso + "T00:00:00"' if is_datetime else "target_iso"
+    move_value_expr = (
+        f'target_iso + str(row.get("{date_field_snake}", ""))[10:]'
+        if is_datetime
+        else "target_iso"
+    )
+
+    def _move_lines(indent: str) -> list:
+        # Corps du déplacement (PUT sur `date_field` du premier événement du
+        # jour source), paramétré par l'indentation de base : appelé au
+        # niveau du corps de la méthode (pas de création rapide générée) ou
+        # imbriqué dans le "else:" de la branche "__new__" (création rapide
+        # générée) — voir l'appel plus bas.
+        return [
+            f"{indent}row = next(",
+            f'{indent}    (r for r in self.rows if str(r.get("{date_field_snake}", ""))[:10] == dragging), None',
+            f"{indent})",
+            f"{indent}if row is not None:",
+            f"{indent}    new_value = {move_value_expr}",
+            f'{indent}    payload = {{"{date_field_snake}": new_value}}',
+            f"{indent}    async with httpx.AsyncClient() as client:",
+            f'{indent}        await client.put(f"{{BACKEND_URL}}/{url_path}{{row[\'id\']}}", json=payload{headers_kwarg})',
+        ]
+
+    state_lines += [
+        "    async def drop_on_day(self, target_iso: str):",
+        '        """Glisser-déposer (tâche #36) : déposer le jour `dragging` (ou le'
+        ' chip "+", `dragging == "__new__"`) sur `target_iso` — voir la',
+        "        docstring de cette fonction plus haut pour le détail du comportement.",
+        '        """',
+        "        dragging = self.dragging",
+        '        self.dragging = ""',
+        "        if not dragging or dragging == target_iso:",
+        "            return",
+    ]
+    state_lines += auth_header_lines
+    if quick_create_safe:
+        # Seul cas où `dragging` peut valoir "__new__" (voir start_drag_new,
+        # généré uniquement ici) : le "else" ci-dessous (déplacement) n'est
+        # donc jamais mort côté généré — pas de branche de création
+        # inaccessible quand le chip est omis (voir la branche `else` de ce
+        # `if quick_create_safe`, plus bas, qui saute directement au
+        # déplacement dans ce cas).
+        state_lines += [
+            '        if dragging == "__new__":',
+            f"            new_value = {new_value_expr}",
+            f'            payload = {{"{date_field_snake}": new_value}}',
+        ]
+        if title_field_snake:
+            state_lines.append(
+                f'            payload["{title_field_snake}"] = "Nouvel évènement / New event"'
+            )
+        state_lines += [
+            "            async with httpx.AsyncClient() as client:",
+            f'                await client.post(f"{{BACKEND_URL}}/{url_path}", json=payload{headers_kwarg})',
+            "        else:",
+        ]
+        state_lines += _move_lines("            ")
+    else:
+        state_lines += _move_lines("        ")
+    state_lines += [
+        "        await self.load_rows()",
+        "",
     ]
     state_code = "\n".join(state_lines) + "\n"
 
     weekday_header = ",\n        ".join(
         f'rx.text("{label}", size="2", weight="bold", align="center")' for label in _WEEKDAY_LABELS
     )
+    # Cellule-jour = NovaDnd (voir _CALENDAR_DND_HELPER) plutôt que rx.box :
+    # à la fois draggable (source d'un déplacement) et cible de dépose (jour
+    # visé par un déplacement OU par le chip "+ Nouvel évènement") — tâche
+    # #36, voir la docstring de cette fonction pour le détail.
     month_day_cell = (
-        "rx.box(\n"
+        "NovaDnd.create(\n"
         '            rx.text(day["day"], size="2", weight="bold"),\n'
         '            rx.cond(day["events_text"] != "", rx.text(day["events_text"], size="1", color_scheme="gray")),\n'
+        "            draggable=True,\n"
+        f'            on_drag_start=lambda: {state_cls}.start_drag_day(day["date"]),\n'
+        "            on_drag_over=rx.prevent_default,\n"
+        f'            on_drop=lambda: {state_cls}.drop_on_day(day["date"]),\n'
         '            opacity=rx.cond(day["in_month"], "1", "0.35"),\n'
         '            padding="0.5em",\n'
         '            border="1px solid var(--gray-5)",\n'
         '            min_height="80px",\n'
         '            width="100%",\n'
+        '            cursor="grab",\n'
         "        )"
     )
     week_day_cell = (
-        "rx.box(\n"
+        "NovaDnd.create(\n"
         '            rx.text(day["weekday"], size="1", color_scheme="gray"),\n'
         '            rx.text(day["day"], size="2", weight="bold"),\n'
         '            rx.cond(day["events_text"] != "", rx.text(day["events_text"], size="1", color_scheme="gray")),\n'
+        "            draggable=True,\n"
+        f'            on_drag_start=lambda: {state_cls}.start_drag_day(day["date"]),\n'
+        "            on_drag_over=rx.prevent_default,\n"
+        f'            on_drop=lambda: {state_cls}.drop_on_day(day["date"]),\n'
         '            padding="0.5em",\n'
         '            border="1px solid var(--gray-5)",\n'
         '            min_height="100px",\n'
         '            width="100%",\n'
+        '            cursor="grab",\n'
         "        )"
     )
     month_grid = (
@@ -578,6 +829,25 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         ")"
     )
     slug = _calendar_ics_slug(cal)
+    # Chip "+ Nouvel évènement" (tâche #36) : draggable (pas de on_drop, ce
+    # n'est jamais une CIBLE de dépose) — glissé sur une cellule-jour, son
+    # `on_drop` (`drop_on_day`) crée l'enregistrement. Omis quand
+    # `_calendar_quick_create_safe` a décidé que ce n'est pas sûr (voir sa
+    # docstring) ; le déplacement d'événement reste, lui, toujours proposé.
+    new_event_chip = (
+        "        NovaDnd.create(\n"
+        '            "+ Nouvel évènement / + New event",\n'
+        "            draggable=True,\n"
+        f"            on_drag_start={state_cls}.start_drag_new,\n"
+        '            padding="0.3em 0.6em",\n'
+        '            border="1px dashed var(--accent-9)",\n'
+        '            border_radius="6px",\n'
+        '            font_size="0.85em",\n'
+        '            cursor="grab",\n'
+        "        ),\n"
+        if quick_create_safe
+        else ""
+    )
     inner = (
         "rx.vstack(\n"
         f'    rx.heading("{cal.name}", size="7"),\n'
@@ -589,6 +859,7 @@ def _generate_calendar_state_and_view(cal: Calendar, program: NovaProgram, has_a
         f'        rx.button("Jour / Day", on_click=lambda: {state_cls}.set_view("day"), '
         f'size="2", variant=rx.cond({state_cls}.view == "day", "solid", "soft")),\n'
         f'        rx.link("Exporter iCal / Export iCal", href=f"{{PUBLIC_BACKEND_URL}}/ics/{slug}.ics", is_external=True),\n'
+        f"{new_event_chip}"
         '        spacing="3",\n'
         '        align="center",\n'
         '        wrap="wrap",\n'
@@ -1458,6 +1729,10 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         lines.append("")
         page_fns.append((to_snake_case(page.name) + "_page", _page_route(page), page.name))
 
+    if any(c.aggregation for c in program.charts):
+        lines.append(_CHART_AGGREGATE_HELPER.strip("\n"))
+        lines.append("")
+
     for chart in program.charts:
         state_code, view_code = _generate_chart_state_and_view(chart, program, has_auth)
         lines.append(state_code)
@@ -1465,6 +1740,10 @@ def generate_frontend(program: NovaProgram) -> dict[str, str]:
         lines.append(view_code)
         lines.append("")
         page_fns.append((to_snake_case(chart.name) + "_chart_page", _chart_route(chart), chart.title or chart.name))
+
+    if program.calendars:
+        lines.append(_CALENDAR_DND_HELPER.strip("\n"))
+        lines.append("")
 
     for cal in program.calendars:
         state_code, view_code = _generate_calendar_state_and_view(cal, program, has_auth)

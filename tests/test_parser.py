@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from nova_compiler.ast_nodes import ValidationExpr
 from nova_compiler.parser import NovaSyntaxError, parse_file, parse_source
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
@@ -306,6 +307,84 @@ def test_query_or_keyword_recognizes_all_six_languages():
         assert len(q.filter_groups[0].filters) == 2, lang
 
 
+def test_query_join_parses_entity_and_qualified_filter_and_sort():
+    src = """
+    entity Client { field nom: string field pays: string }
+    entity Commande { field montant: float belongs_to Client }
+    requete CommandesFrance sur Commande {
+      jointure: Client sur client_id = Client.id
+      filtre: Client.pays == "FR"
+      trier_par: Client.nom asc
+    }
+    """
+    program = parse_source(src)
+    q = program.queries[0]
+    assert len(q.joins) == 1
+    join = q.joins[0]
+    assert join.entity == "Client"
+    assert join.local_field == "client_id"
+    assert join.remote_field == "Client.id"
+    assert q.filters[0].field == "Client.pays"
+    assert q.order_by == "Client.nom"
+
+
+def test_query_join_keyword_recognizes_all_six_languages():
+    # jointure (fr) | join (en) | union (es) | verknuepfung (de) | unione (it) | juncao (pt)
+    sources = {
+        "fr": ("requete", "sur", "jointure", "sur"),
+        "en": ("query", "on", "join", "on"),
+        "es": ("consulta", "en", "union", "en"),
+        "de": ("abfrage", "von", "verknuepfung", "von"),
+        "it": ("interrogazione", "su", "unione", "su"),
+        "pt": ("consulta", "em", "juncao", "em"),
+    }
+    for lang, (q_kw, on1, j_kw, on2) in sources.items():
+        src = (
+            "entity Client { field nom: string }\n"
+            "entity Commande { field montant: float belongs_to Client }\n"
+            f"{q_kw} X {on1} Commande {{ {j_kw}: Client {on2} client_id = Client.id }}"
+        )
+        program = parse_source(src)
+        q = program.queries[0]
+        assert len(q.joins) == 1, lang
+        assert q.joins[0].entity == "Client", lang
+
+
+def test_query_join_unknown_entity_raises_compile_error():
+    src = """
+    entity Commande { field montant: float }
+    requete X sur Commande { jointure: Inconnue sur montant = Inconnue.id }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_query_join_unknown_field_raises_compile_error():
+    src = """
+    entity Client { field nom: string }
+    entity Commande { field montant: float belongs_to Client }
+    requete X sur Commande {
+      jointure: Client sur client_id = Client.id
+      filtre: Client.inexistant == 1
+    }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_query_join_field_without_qualifier_resolves_to_primary_entity():
+    src = """
+    entity Client { field nom: string }
+    entity Commande { field montant: float belongs_to Client }
+    requete X sur Commande {
+      jointure: Client sur client_id = Client.id
+      filtre: montant > 10
+    }
+    """
+    program = parse_source(src)
+    assert program.queries[0].filters[0].field == "montant"
+
+
 def test_style_block_parses_props_on_page_show():
     src = """
     entity Produit {
@@ -605,6 +684,100 @@ def test_chart_multi_series_accepted_for_bar_line_area_types():
         assert program.charts[0].y_fields == ["ventes", "couts"]
 
 
+def test_chart_type_keyword_recognizes_donut_and_funnel_all_six_languages():
+    # Nouveaux types (tâche #35) : donut/anneau/rosquilla/ciambella/rosca et
+    # funnel/entonnoir/embudo/trichter/imbuto/funil — voir keywords.CHART_TYPES.
+    types = {
+        "donut": "donut", "anneau": "donut", "beignet": "donut",
+        "rosquilla": "donut", "dona": "donut", "ciambella": "donut", "rosca": "donut",
+        "funnel": "funnel", "entonnoir": "funnel", "embudo": "funnel",
+        "trichter": "funnel", "imbuto": "funnel", "funil": "funnel",
+    }
+    for word, canonical in types.items():
+        src = f"""
+        entity P {{ field n: string }}
+        chart C sur P {{ type: {word} }}
+        """
+        program = parse_source(src)
+        assert program.charts[0].type == canonical, word
+
+
+def test_chart_donut_and_funnel_reject_multi_series():
+    # Comme pie/radar/scatter : ni donut ni funnel n'ont de rendu multi-séries
+    # simple dans rx.recharts (kw.CHART_MULTI_SERIES_TYPES).
+    for chart_type in ("donut", "funnel"):
+        src = f"""
+        entity Mesure {{
+            field jour: string required
+            field ventes: int required
+            field couts: int required
+        }}
+        chart C sur Mesure {{
+            type: {chart_type}
+            axe_x: jour
+            axe_y: ventes, couts
+        }}
+        """
+        with pytest.raises(NovaSyntaxError):
+            parse_source(src)
+
+
+def test_chart_aggregation_function_recognizes_all_six_languages():
+    # count/sum/avg/min/max et leurs alias par langue (kw.CHART_AGGREGATIONS).
+    functions = {
+        "compte": "count", "nombre": "count", "cantidad": "count", "anzahl": "count",
+        "conteggio": "count", "contagem": "count",
+        "somme": "sum", "suma": "sum", "summe": "sum", "soma": "sum",
+        "moyenne": "avg", "promedio": "avg", "durchschnitt": "avg", "media": "avg",
+        "min": "min", "minimum": "min",
+        "max": "max", "maximum": "max",
+    }
+    for word, canonical in functions.items():
+        src = f"""
+        entity P {{ field cat: string field v: int }}
+        chart C sur P {{ type: barres axe_x: cat axe_y: v agregation: {word} }}
+        """
+        program = parse_source(src)
+        assert program.charts[0].aggregation == canonical, word
+
+
+def test_chart_aggregation_unknown_function_raises_syntax_error():
+    src = """
+    entity P { field cat: string field v: int }
+    chart C sur P { type: barres axe_x: cat axe_y: v agregation: bogus }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_chart_aggregation_requires_axe_x():
+    src = """
+    entity P { field cat: string field v: int }
+    chart C sur P { type: barres axe_y: v agregation: somme }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_chart_aggregation_non_count_requires_axe_y():
+    src = """
+    entity P { field cat: string field v: int }
+    chart C sur P { type: barres axe_x: cat agregation: somme }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_chart_aggregation_count_does_not_require_axe_y():
+    src = """
+    entity P { field cat: string field v: int }
+    chart C sur P { type: barres axe_x: cat agregation: compte }
+    """
+    program = parse_source(src)
+    assert program.charts[0].aggregation == "count"
+    assert program.charts[0].y_fields == []
+
+
 def test_rich_field_types_file_image_color_recognize_all_six_languages():
     # file/fichier/archivo/datei/(file)/arquivo, image/imagen/bild/immagine/
     # imagem, color/couleur/farbe/colore/cor — voir keywords.TYPES.
@@ -653,6 +826,32 @@ def test_email_block_defaults_when_props_omitted():
     assert program.email.port == 587
     assert program.email.tls is True
     assert program.email.to_addr == ""
+
+
+def test_email_template_prop_parses_and_recognizes_all_six_languages():
+    # `template`/`modele`/`modèle`/`plantilla`/`vorlage`/`modello`/`modelo`
+    # (tâche #37) : chemin d'un fichier .html externe personnalisable,
+    # résolu relativement au fichier .nova source (voir
+    # codegen/__init__.py::generate_project, même mécanisme que
+    # `application { css: "..." }`). Optionnel : un bloc `email { ... }`
+    # sans lui garde le comportement historique inchangé (sujet/corps HTML
+    # générés automatiquement, voir codegen/api_fastapi.py::_generate_router).
+    sources = {
+        "fr": 'email { hote: "s" modele: "gabarit.html" }',
+        "en": 'email { host: "s" template: "gabarit.html" }',
+        "es": 'email { host: "s" plantilla: "gabarit.html" }',
+        "de": 'email { host: "s" vorlage: "gabarit.html" }',
+        "it": 'email { host: "s" modello: "gabarit.html" }',
+        "pt": 'email { host: "s" modelo: "gabarit.html" }',
+    }
+    for lang, src in sources.items():
+        program = parse_source(src)
+        assert program.email.template == "gabarit.html", lang
+
+
+def test_email_template_defaults_to_none_when_omitted():
+    program = parse_source('email { hote: "s" }')
+    assert program.email.template is None
 
 
 def test_email_keyword_and_prop_aliases_recognize_all_six_languages():
@@ -1075,7 +1274,8 @@ def test_validation_block_parses_rule_and_message():
     assert v.entity == "Reservation"
     assert len(v.rules) == 1
     rule = v.rules[0]
-    assert (rule.field_a, rule.op, rule.field_b) == ("date_fin", ">", "date_debut")
+    assert (rule.expr_a.value, rule.op, rule.expr_b.value) == ("date_fin", ">", "date_debut")
+    assert rule.expr_a.kind == rule.expr_b.kind == "field"
     assert rule.message == "La date de fin doit etre apres le debut."
 
 
@@ -1196,6 +1396,110 @@ def test_validation_keyword_recognizes_all_six_languages():
         """
         program = parse_source(src)
         assert program.validations[0].rules[0].message == "x"
+
+
+def test_validation_rule_accepts_function_call_and_arithmetic():
+    src = """
+    entity Facture {
+      field prix_ht: float required
+      field frais_port: float required
+      field prix_ttc: float required
+    }
+    validation X sur Facture {
+      regle: prix_ttc == prix_ht + frais_port message: "m1"
+      regle: min(prix_ht, frais_port) >= 0 message: "m2"
+      regle: round(prix_ht, 2) == prix_ht message: "m3"
+    }
+    """
+    program = parse_source(src)
+    rules = program.validations[0].rules
+
+    r1 = rules[0]
+    assert r1.expr_a == ValidationExpr(kind="field", value="prix_ttc")
+    assert r1.expr_b.kind == "binop" and r1.expr_b.value == "+"
+    assert [a.value for a in r1.expr_b.args] == ["prix_ht", "frais_port"]
+
+    r2 = rules[1]
+    assert r2.expr_a.kind == "call" and r2.expr_a.value == "min"
+    assert [a.value for a in r2.expr_a.args] == ["prix_ht", "frais_port"]
+    assert r2.expr_b == ValidationExpr(kind="number", value=0)
+
+    r3 = rules[2]
+    assert r3.expr_a.kind == "call" and r3.expr_a.value == "round"
+    assert r3.expr_a.args[0].value == "prix_ht"
+    assert r3.expr_a.args[1] == ValidationExpr(kind="number", value=2)
+
+
+def test_validation_function_aliases_recognize_multiple_languages():
+    # min/max n'ont pas d'alias par langue distincts (mot court identique
+    # partout) ; round/abs, si.
+    for fn, canonical in [
+        ("round", "round"), ("arrondi", "round"), ("redondear", "round"),
+        ("runden", "round"), ("arrotonda", "round"), ("arredondar", "round"),
+        ("abs", "abs"), ("valeur_absolue", "abs"), ("betrag", "abs"),
+    ]:
+        src = f"""
+        entity F {{ field a: float required }}
+        validation X sur F {{ regle: {fn}(a) >= 0 message: "m" }}
+        """
+        program = parse_source(src)
+        assert program.validations[0].rules[0].expr_a.value == canonical, fn
+
+
+def test_validation_unknown_function_raises_syntax_error():
+    src = """
+    entity F { field a: float required }
+    validation X sur F { regle: inconnue(a) > 0 message: "m" }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_validation_function_wrong_arity_raises_syntax_error():
+    src = """
+    entity F { field a: float required }
+    validation X sur F { regle: abs(a, a) > 0 message: "m" }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+    src2 = """
+    entity F { field a: float required }
+    validation X sur F { regle: min(a) > 0 message: "m" }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src2)
+
+
+def test_validation_arithmetic_rejects_non_numeric_field():
+    src = """
+    entity F { field a: string required field b: float required }
+    validation X sur F { regle: a + b > 0 message: "m" }
+    """
+    with pytest.raises(NovaSyntaxError):
+        parse_source(src)
+
+
+def test_validation_negative_number_literal_parses_as_number():
+    src = """
+    entity F { field a: float required }
+    validation X sur F { regle: a > -5 message: "m" }
+    """
+    program = parse_source(src)
+    assert program.validations[0].rules[0].expr_b == ValidationExpr(kind="number", value=-5)
+
+
+def test_validation_minus_operator_without_spaces_still_tokenizes_as_binop():
+    # `b-c` (pas d'espace) : le lexer contextuel LALR ne doit PAS matcher
+    # "-c" comme un unique NUMBER négatif — voir le commentaire sur
+    # `validation_expr`/`VAL_OP` dans grammar/nova.lark.
+    src = """
+    entity F { field a: float required field b: float required field c: float required }
+    validation X sur F { regle: a == b-c message: "m" }
+    """
+    program = parse_source(src)
+    expr_b = program.validations[0].rules[0].expr_b
+    assert expr_b.kind == "binop" and expr_b.value == "-"
+    assert [a.value for a in expr_b.args] == ["b", "c"]
 
 
 # --------------------------------------------------------------- i18n cfg ---
@@ -1363,40 +1667,31 @@ def test_database_keyword_recognizes_all_six_languages():
 # ------------------------------------------- mongodb (backend NoSQL, tâche #29) ---
 
 
-def test_mongo_backend_rejects_query_calendar_and_has_many():
+def test_mongo_backend_rejects_query_join_only():
+    """Depuis la tâche #34, `requete`/`calendar`/`has_many` fonctionnent
+    tous avec `database: mongodb` (voir
+    test_mongo_backend_allows_query_calendar_and_has_many ci-dessous) —
+    seule une `jointure:` (propre au backend SQL, `select().join(...)`)
+    reste rejetée à la compilation pour ce backend."""
     base = """
     application Boutique {
       nom: "Boutique"
       database: mongodb
     }
     entity Produit { field prix: entier }
-    """
-    with pytest.raises(NovaSyntaxError, match="mongodb"):
-        parse_source(base + '\nrequete Cher sur Produit { filtre: prix > 10 }\n')
-
-    with pytest.raises(NovaSyntaxError, match="mongodb"):
-        parse_source(
-            base
-            + "\nentity Cal { field d: date_heure }"
-            + "\ncalendrier Agenda sur Cal { champ_date: d }\n"
-        )
-
-    has_many_src = """
-    application Boutique {
-      nom: "Boutique"
-      database: mongodb
-    }
-    entity Produit { field prix: entier possede_plusieurs Ligne }
     entity Ligne { field n: chaine appartient_a Produit }
     """
     with pytest.raises(NovaSyntaxError, match="mongodb"):
-        parse_source(has_many_src)
+        parse_source(
+            base + "\nrequete X sur Ligne { jointure: Produit sur produit_id = Produit.id }\n"
+        )
+    # Sans jointure, requete/calendar/has_many ne lèvent plus d'erreur.
+    parse_source(base + "\nrequete Cher sur Produit { filtre: prix > 10 }\n")
 
 
 def test_mongo_backend_allows_validation_email_auth_and_chart_on_entity():
     """Les fonctionnalités backend-agnostiques (voir la docstring de
-    codegen/api_mongo.py) restent utilisables avec `database: mongodb` —
-    seuls `requete`/`calendar`/`has_many` sont rejetés."""
+    codegen/api_mongo.py) restent utilisables avec `database: mongodb`."""
     src = """
     application Boutique {
       nom: "Boutique"
@@ -1414,3 +1709,23 @@ def test_mongo_backend_allows_validation_email_auth_and_chart_on_entity():
     """
     program = parse_source(src)
     assert program.database_engine() == "mongodb"
+
+
+def test_mongo_backend_allows_query_calendar_and_has_many():
+    src = """
+    application Boutique {
+      nom: "Boutique"
+      database: mongodb
+    }
+    entity Produit {
+      field prix: entier
+      field date_ajout: date_heure
+      possede_plusieurs Ligne
+    }
+    entity Ligne { field n: chaine appartient_a Produit }
+    requete Cher sur Produit { filtre: prix > 10 }
+    calendrier Agenda sur Produit { champ_date: date_ajout }
+    """
+    program = parse_source(src)
+    assert program.database_engine() == "mongodb"
+    assert program.queries and program.calendars

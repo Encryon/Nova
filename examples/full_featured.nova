@@ -57,6 +57,17 @@ entité Accessoire {
   appartient_a Produit
 }
 
+// Entité minimale (2 champs requis, aucune relation `appartient_a`) et API
+// NON protégée : sert au calendrier `Rappels` plus bas (tâche #36) pour
+// exercer le glisser-déposer par exécution réelle sans passer par
+// `AuthState`/JWT — `get_state(AuthState)` a besoin d'un contexte de requête
+// Reflex actif, absent quand un test instancie un state directement (voir
+// `test_chart_frontend_module_actually_imports_and_builds_all_pages`).
+entité Rappel {
+  champ titre: chaine requis
+  champ date_rappel: date_heure requis
+}
+
 auth {
   roles: admin, user
 }
@@ -75,6 +86,12 @@ api Accessoire {
   créer
 }
 
+api Rappel {
+  liste
+  créer
+  modifier
+}
+
 requete ProduitsChers sur Produit {
   filtre: prix > 100
   trier_par: prix desc
@@ -90,6 +107,15 @@ requete ProduitsAlerte sur Produit {
     filtre: prix < 10
     filtre: prix > 1000
   }
+}
+
+// Jointure explicite (indépendante de la relation appartient_a déclarée
+// ci-dessus, bien qu'elle relie les deux mêmes entités) : filtre sur un
+// champ de l'entité JOINTE (Produit.prix), pas de l'entité principale
+// (Accessoire) — voir ast_nodes.QueryJoin / _generate_query_router.
+requete AccessoiresAvecProduit sur Accessoire {
+  jointure: Produit sur produit_id = Produit.id
+  filtre: Produit.prix > 100
 }
 
 page Produits {
@@ -152,11 +178,46 @@ chart NuagePrix sur Produit {
   titre: "Nuage de prix"
 }
 
+// Graphique anneau (donut, nouveau type tâche #35) : même rendu que "pie"
+// avec un inner_radius (voir codegen/ui_reflex.py).
+chart PrixParProduit sur Produit {
+  type: donut
+  axe_x: nom
+  axe_y: prix
+  titre: "Répartition des prix (anneau)"
+}
+
+// Graphique entonnoir (funnel, nouveau type tâche #35).
+chart StockEntonnoir sur Produit {
+  type: funnel
+  axe_x: nom
+  axe_y: stock
+  titre: "Stock (entonnoir)"
+}
+
+// Graphique avec agrégation (tâche #35) : `agregation: compte` regroupe les
+// lignes par `axe_x` (ici `nom`) et compte les enregistrements de chaque
+// groupe — `axe_y` est optionnel pour "compte" (voir _validate_charts).
+chart NombreProduits sur Produit {
+  type: barres
+  axe_x: nom
+  agregation: compte
+  titre: "Nombre de produits"
+}
+
 // Calendrier sur l'entité (protégé, hérite de `api Produit { proteger: admin }`) :
 // vue mensuelle des produits par date d'ajout.
 calendrier Ajouts sur Produit {
   champ_date: date_ajout
   champ_titre: nom
+}
+
+// Calendrier NON protégé sur `entité Rappel` (voir plus haut) : glisser-
+// déposer (tâche #36) exercé par exécution réelle (déplacement ET création
+// rapide, `entité Rappel` n'ayant que ses deux champs date/titre requis).
+calendrier Rappels sur Rappel {
+  champ_date: date_rappel
+  champ_titre: titre
 }
 
 // Page multi-entités : deux `afficher` sur la MÊME entité Produit, dans

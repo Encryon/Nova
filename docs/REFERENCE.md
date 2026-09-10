@@ -109,9 +109,45 @@ telle quelle.
 | Croissant / Ascending | `croissant` / `asc` | `asc` | `ascendente` | `aufsteigend` | `crescente` | `ascendente` |
 | Décroissant / Descending | `décroissant` / `decroissant` | `desc` | `descendente` | `absteigend` | `decrescente` | `descendente` |
 | Limite / Limit | `limite` | `limit` | `límite` | `limit` | `limite` | `limite` |
+| Jointure / Join | `jointure` | `join` | `union` | `verknüpfung` | `unione` | `junção` |
 
 Comparateurs disponibles (identiques dans toutes les langues, ce sont des
 symboles) : `>`, `<`, `>=`, `<=`, `==`, `!=`.
+
+`jointure: <Entité> sur <local> = <distant>` relie explicitement une autre
+entité à la requête (indépendamment des relations `appartient_a`/
+`possede_plusieurs` éventuellement déjà déclarées) : `<local>`/`<distant>`
+sont chacun un champ, éventuellement qualifié `<Entité>.<champ>` (non
+qualifié = entité principale de la requête). Les `filtre:`/`trier_par:`
+suivants peuvent alors référencer un champ qualifié de l'entité jointe
+(`filtre: <Entité>.<champ> ...`) — voir la section "Requêtes déclaratives"
+du README pour un exemple complet et la forme de la réponse (l'entité
+jointe apparaît sous une clé nommée d'après elle dans chaque enregistrement).
+
+## Validation croisée (bloc `validation <Nom> sur <Entité> { ... }`)
+
+| Mot-clé | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Bloc validation | `validation` | `validation` | `validación` | `validierung` | `convalida` / `validazione` | `validação` |
+| Règle / Rule | `regle` / `règle` | `rule` | `regla` | `regel` | `regola` | `regra` |
+| Message | `message` | `message` | `mensaje` | `nachricht` | `messaggio` | `mensagem` |
+
+Fonctions disponibles dans une expression `regle:` (mêmes noms dans les 6
+langues — sauf `round`/`abs`, qui ont des alias) :
+
+| Fonction | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| min / max | `min` / `max` | `min` / `max` | `min` / `max` | `min` / `max` | `min` / `max` | `min` / `max` |
+| Arrondi / Round | `arrondi` / `arrondir` | `round` | `redondear` | `runden` | `arrotonda` / `arrotondare` | `arredondar` |
+| Valeur absolue / Abs | `abs` / `valeur_absolue` | `abs` | `abs` / `valor_absoluto` | `abs` / `betrag` | `abs` | `abs` / `valor_absoluto` |
+
+`regle: <expression> <comparateur> <expression> message: "..."` — chaque
+`<expression>` est un champ, une constante, une combinaison `+`/`-`, ou un
+appel de fonction (`min`/`max` : 2+ arguments ; `round` : 1 ou 2 ; `abs` :
+1) — voir la section "Validation croisée entre champs" du README pour un
+exemple complet et les règles de validation (champs numériques requis
+sous une fonction/`+`/`-`, date/date_heure acceptée seulement pour un
+champ nu seul de chaque côté d'un opérateur d'ordre).
 
 ## Graphiques (bloc `chart <Nom> sur <Entité|Requête> { ... }`)
 
@@ -132,6 +168,7 @@ alias déclarés dans `keywords.CHART_PROP_ALIASES` (même mécanisme que
 | Axe X / X axis | `axe_x` | `x` / `x_axis` | `eje_x` | `x_achse` | `asse_x` | `eixo_x` |
 | Axe Y / Y axis | `axe_y` | `y` / `y_axis` | `eje_y` | `y_achse` | `asse_y` | `eixo_y` |
 | Titre / Title | `titre` | `title` | `titulo` / `título` | `titel` | `titolo` | `titulo` / `título` |
+| Agrégation / Aggregation (tâche #35) | `agregation` / `agrégation` | `aggregation` | `agregacion` / `agregación` | `aggregierung` | `aggregazione` | `agregacao` / `agregação` |
 
 Valeurs possibles pour `type:` (alias déclarés dans `keywords.CHART_TYPES`) :
 
@@ -141,6 +178,10 @@ Valeurs possibles pour `type:` (alias déclarés dans `keywords.CHART_TYPES`) :
 | Ligne / Line | `ligne` | `line` | `linea` / `línea` | `linie` | `linea` | `linha` |
 | Camembert / Pie | `camembert` | `pie` | `tarta` / `circular` | `kreis` | `torta` / `pizza` | `torta` |
 | Aires / Area | `aire` | `area` | `área` | `flaeche` / `fläche` | `area` | `area` |
+| Radar | `radar` / `araignée` | `radar` | `radial` | `radar` | `radar` | `radar` |
+| Nuage de points / Scatter | `nuage` / `dispersion` | `scatter` | `dispersion` | `streudiagramm` / `punktdiagramm` | `dispersion` | `dispersao` / `dispersão` |
+| Anneau / Donut (tâche #35) | `anneau` / `beignet` | `donut` | `rosquilla` / `dona` | `donut` | `ciambella` | `rosca` |
+| Entonnoir / Funnel (tâche #35) | `entonnoir` | `funnel` | `embudo` | `trichter` | `imbuto` | `funil` |
 
 `sur`/`on` référence soit une **entité** déclarée (données = son API
 liste, protection JWT héritée de `api <Entité> { proteger: <rôle> }` si
@@ -149,6 +190,33 @@ haut dans le fichier (données déjà filtrées/triées, route toujours
 publique). Une référence inconnue lève une erreur à la compilation
 (`chart X sur Y` où `Y` n'est ni une entité ni une requête déclarée),
 pas une page qui échoue silencieusement au premier chargement.
+
+`axe_y` accepte plusieurs champs séparés par des virgules pour un
+graphique multi-séries (`axe_y: ventes, couts`), uniquement sur les
+types qui s'y prêtent (`kw.CHART_MULTI_SERIES_TYPES` = `bar`/`line`/
+`area`) — rejeté à la compilation sur `pie`/`radar`/`scatter`/`donut`/
+`funnel`.
+
+**Agrégation** (`agregation`/`aggregation`, tâche #35) : regroupe les
+lignes par `axe_x` puis agrège `axe_y` avec une fonction déclarée dans
+`keywords.CHART_AGGREGATIONS` :
+
+| Fonction | FR | EN | ES | DE | IT | PT |
+|---|---|---|---|---|---|---|
+| Compte / Count | `compte` / `nombre` | `count` | `cantidad` | `anzahl` | `conteggio` | `contagem` |
+| Somme / Sum | `somme` | `sum` | `suma` | `summe` | `somme` | `soma` |
+| Moyenne / Average | `moyenne` | `avg` / `average` | `promedio` / `media` | `durchschnitt` | `media` | `media` |
+| Min | `min` / `minimum` | `min` / `minimum` | `min` | `mindestens` | `min` | `min` |
+| Max | `max` / `maximum` | `max` / `maximum` | `max` | `hoechstens` / `höchstens` | `max` | `max` |
+
+`compte`/`count` n'a pas besoin de `axe_y` (compte les lignes de
+chaque groupe) ; les autres fonctions l'exigent — validé à la
+compilation par `_validate_charts` (`parser.py`), comme la référence
+`sur` inconnue et le multi-séries sur un type qui ne le supporte pas.
+Le calcul lui-même se fait côté frontend, dans le `load_rows()` de
+l'état Reflex du graphique (`_nova_chart_aggregate`, voir
+`codegen/ui_reflex.py::_CHART_AGGREGATE_HELPER`) — aucune modification
+du backend ni de la route de données source.
 
 ## Notifications email (bloc `email { ... }` + `notifier:` sur `api`)
 
@@ -169,6 +237,7 @@ pas des mots-clés de grammaire dédiés :
 | Expéditeur / From | `expediteur` / `expéditeur` | `from` | `remitente` | `absender` | `mittente` | `remetente` |
 | Destinataire / To | `destinataire` | `to` | `destinatario` | `empfaenger` / `empfänger` | `destinatario` | `destinatario` |
 | TLS | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` | `tls` / `ssl` |
+| Template (tâche #37) | `modele` / `modèle` | `template` | `plantilla` | `vorlage` | `modello` | `modelo` |
 
 `notifier:`/`notify:` accepte une liste d'actions séparées par des
 virgules, parmi les mêmes mots-clés que le bloc `api` (`creer`/`create`,
@@ -189,6 +258,32 @@ langue. Il est fourni exclusivement au runtime via la variable
 d'environnement `NOVA_SMTP_PASSWORD` (voir README, section
 "Notifications par email"). `notifier:` sans bloc `email { ... }`
 déclaré dans le même fichier lève une erreur à la compilation.
+
+**`template`/`modele` (tâche #37, optionnel)** — chemin d'un fichier
+`.html` résolu relativement au fichier `.nova` source, copié tel quel
+dans `backend/app/email_templates/notification.html` au moment de la
+compilation (`codegen/__init__.py::generate_project`, même mécanisme
+que `application { css: "..." }` — placeholder généré si le fichier
+référencé est introuvable, jamais d'échec de compilation). Quand ce
+bloc est présent, `backend/app/emailer.py` génère en plus une fonction
+`render_email_template(values: dict) -> tuple[str, str, str]`
+(sujet, corps HTML, repli texte brut) et `_generate_router` (voir
+`api_fastapi.py::_template_field_names`) l'appelle à la place du
+sujet/corps codés en dur, avec un dict portant `action`
+(`created`/`updated`/`deleted`), `entity` (nom NOVA de l'entité), `id`,
+et un champ par attribut substituable de l'entité (mêmes conventions de
+nommage que `models.py` : `<champ>_<langue>` pour un champ multilingue,
+`<cible>_id` pour une référence `belongs_to`). Le fichier HTML peut
+utiliser ces clés sous forme de `{{cle}}` ; une balise
+`<title>...</title>` (une fois les `{{...}}` substitués) devient le
+sujet de l'email, sinon un sujet générique bilingue est utilisé.
+Pour `delete`, l'enregistrement est capturé dans un dict
+`deleted_values` **avant** `session.delete`/`commit` (l'objet SQLModel
+expire après le commit) — voir les tests
+`test_email_template_file_copied_and_used_for_render_real_execution`
+et `test_email_template_placeholder_used_when_referenced_file_missing`
+dans `tests/test_codegen.py`, et `test_email_template_prop_parses_and_
+recognizes_all_six_languages` dans `tests/test_parser.py`.
 
 ## Calendrier (bloc `calendar <Nom> sur <Entité> { ... }`)
 
@@ -232,9 +327,29 @@ calendrier Ajouts sur Produit {
   déclarée), pas une page qui échoue silencieusement au premier
   chargement.
 - Génère une page Reflex dédiée (route `/calendriers/<nom>`) avec une
-  grille mensuelle calculée côté serveur via la seule bibliothèque
-  standard Python (`calendar`, `datetime`) — aucune dépendance JS
-  supplémentaire, vue lecture seule dans ce MVP.
+  grille mois/semaine/jour calculée côté serveur via la seule
+  bibliothèque standard Python (`calendar`, `datetime`) — aucune
+  dépendance JS supplémentaire.
+- **Glisser-déposer** (tâche #36) : chaque case-jour (mois/semaine) est
+  à la fois draggable et cible de dépose (`NovaDnd`, sous-classe
+  minimale de `rx.el.div` ajoutant `on_drag_start`/`on_drag_over`/
+  `on_drop` — Reflex ne les expose pas nativement sur `Div`, voir
+  `codegen/ui_reflex.py::_CALENDAR_DND_HELPER`). Déposer un jour sur un
+  autre **déplace** le premier événement du jour source (`PUT` sur
+  `champ_date` uniquement, heure préservée pour `date_heure`) —
+  toujours généré. Un chip « + Nouvel évènement » dans la barre
+  d'outils **crée** un enregistrement en étant déposé sur un jour
+  (`POST` avec `champ_date` + `champ_titre` par défaut) — généré
+  uniquement quand `_calendar_quick_create_safe` (`codegen/ui_reflex.py`)
+  détermine que c'est sûr : aucun autre champ requis sans valeur par
+  défaut, et aucune relation `appartient_a` sur l'entité (sinon le chip
+  est omis, le déplacement restant toujours disponible). Les
+  événements d'un même jour étant affichés en un seul texte joint
+  (`champ_titre` de chaque enregistrement séparés par des virgules —
+  `rx.foreach` imbriqué sur une liste dans un dict lève
+  `ForeachVarError`, voir le commentaire sur ce point dans
+  `_generate_calendar_state_and_view`), le glisser-déposer porte sur la
+  case-jour entière, pas un événement individuel.
 
 ## Contenu multilingue (bloc `traductions { ... }` + champ `multilingue`)
 
@@ -326,22 +441,74 @@ application MonApp {
   `values.yaml` Helm changent selon le moteur (voir README, section
   "Base de données").
 - `mongodb`/`mongo` : chemin de génération entièrement différent
-  (modèles [Beanie](https://beanie-odm.dev/), routes `async`), **rejeté
-  à la compilation** (`_validate_mongo_unsupported_features` dans
-  `parser.py`) s'il est combiné avec un bloc `requete`/`query`, un bloc
-  `calendar`/`calendrier`, ou une relation `has_many`/
-  `possede_plusieurs` — voir README, section "Base de données", pour le
-  détail des fonctionnalités supportées malgré tout (auth JWT, email,
-  upload, contenu multilingue, `belongs_to`, `chart` sur entité).
+  (modèles [Beanie](https://beanie-odm.dev/), routes `async`). `requete`/
+  `query` (sans jointure), `calendar`/`calendrier` et les relations
+  `has_many`/`possede_plusieurs` sont pleinement supportés — seule la
+  **jointure explicite** (`jointure:`/`join:` dans un bloc `requete`/
+  `query`) est **rejetée à la compilation**
+  (`_validate_mongo_unsupported_features` dans `parser.py`), MongoDB
+  n'ayant pas de `JOIN` natif — voir README, section "Base de données",
+  pour le détail des fonctionnalités supportées (auth JWT, email,
+  upload, contenu multilingue, `belongs_to`, `chart` sur entité, requêtes,
+  calendrier, `has_many`).
 
 Couvert par `tests/test_parser.py` (section "base sql config" —
 canonicalisation des alias, rejet d'un moteur inconnu, reconnaissance du
 mot-clé `database` dans les 6 langues — et section "backend NoSQL Mongo"
-pour le rejet à la compilation de `requete`/`calendar`/`has_many`) et
-`tests/test_codegen.py` (génération du driver/service/`values.yaml` par
-moteur SQL, et exécution réelle complète — auth JWT, CRUD, unicité,
-validation — du backend Mongo généré via `TestClient` avec
+pour le rejet à la compilation de la jointure explicite et l'acceptation
+de `requete`/`calendar`/`has_many`) et `tests/test_codegen.py`
+(génération du driver/service/`values.yaml` par moteur SQL, et exécution
+réelle complète — auth JWT, CRUD, unicité, validation, requête, calendrier
+`.ics`, `has_many` — du backend Mongo généré via `TestClient` avec
 `mongomock-motor`).
+
+## Migrations Alembic (commande CLI `nova migrate`, tâche #38)
+
+Pas un bloc du DSL — une commande de la CLI `nova` (`nova_compiler/cli.py`),
+disponible uniquement pour un moteur SQL (`program.database_engine() !=
+"mongodb"`, sinon rejetée avec un message explicite avant toute
+génération).
+
+Structure générée dans `codegen/api_fastapi.py::generate_backend_scaffold`
+(constante `_ALEMBIC_SCAFFOLD`) — **une seule fois**, comme
+`routers_custom/` : jamais réécrite par une compilation suivante (voir
+`codegen/__init__.py::generate_project`, boucle `scaffold_files` avec
+`if target.exists(): continue`) :
+
+| Fichier | Rôle |
+|---|---|
+| `backend/alembic.ini` | Config Alembic minimale ; `sqlalchemy.url` volontairement vide (lue dynamiquement depuis `app.database`, jamais codée en dur). |
+| `backend/migrations/env.py` | Importe `app.models` (peuple `SQLModel.metadata`) et réutilise `DATABASE_URL`/`engine` de `app.database` — donc `NOVA_DATABASE_URL` au runtime, rien à configurer. |
+| `backend/migrations/script.py.mako` | Template de révision Alembic standard, avec `import sqlmodel` ajouté (requis : les types SQLModel comme `AutoString` apparaissent dans le SQL autogénéré — sans cet import, `alembic upgrade` lève `NameError: name 'sqlmodel' is not defined`). |
+| `backend/migrations/versions/.gitkeep` | Dossier vide au départ, gardé par git avant la première révision. |
+
+`backend/requirements.txt` reçoit systématiquement `alembic>=1.13` pour un
+backend SQL (jamais pour Mongo, voir `_generate_emailer`... plutôt
+`generate_backend` dans `api_fastapi.py`).
+
+`nova migrate <source.nova> -o <sortie> -m "<message>"` :
+1. Compile le projet (`generate_project`, identique à `nova compile`) —
+   régénère `models.py`, `database.py`, etc., mais jamais le scaffold
+   Alembic ci-dessus.
+2. `subprocess.run([sys.executable, "-m", "alembic", "revision",
+   "--autogenerate", "-m", message], cwd=<sortie>/backend)`.
+3. `subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
+   cwd=<sortie>/backend)`.
+
+Chaque étape échoue explicitement (`typer.Exit(code=1)`, stderr affiché)
+plutôt que de continuer silencieusement. Aucun mock : `alembic` doit être
+importable dans l'environnement Python qui exécute `nova` (même
+hypothèse que `docker compose` pour `nova run`).
+
+Couvert par `tests/test_codegen.py::test_alembic_scaffold_generated_once_
+for_sql_backend` (présence/contenu du scaffold, non-écrasement à la
+recompilation, absence côté Mongo — voir aussi l'assertion dédiée dans
+`test_mongo_backend_generates_beanie_documents_and_nosql_requirements`) et
+`tests/test_cli.py` (exécution réelle d'un VRAI processus `alembic` —
+`revision --autogenerate` puis `upgrade head` contre une base SQLite
+réelle, vérification directe des tables/colonnes créées ; rejet propre
+pour `database: mongodb` ; non-écrasement du scaffold par un `nova
+compile` ultérieur).
 
 ## Exemple : le même programme en 4 langues / Example: the same program in 4 languages
 
@@ -446,7 +613,32 @@ et `test_chart_keyword_and_prop_aliases_recognize_all_six_languages`
 dans le même fichier, ainsi que par un test qui **importe réellement**
 le frontend Reflex généré et construit l'arbre de composants de chaque
 page de graphique (`test_chart_frontend_module_actually_imports_and_builds_all_pages`
-dans `tests/test_codegen.py`).
+dans `tests/test_codegen.py`). Les types `donut`/`funnel` et
+l'agrégation (tâche #35) ont leurs propres tests dans `test_parser.py`
+(`test_chart_type_keyword_recognizes_donut_and_funnel_all_six_languages`,
+`test_chart_donut_and_funnel_reject_multi_series`,
+`test_chart_aggregation_function_recognizes_all_six_languages` et les
+tests de validation associés) ; le helper Python généré
+`_nova_chart_aggregate` est, lui aussi, appelé réellement (pas
+seulement `ast.parse`) avec des données synthétiques dans
+`test_chart_frontend_module_actually_imports_and_builds_all_pages`.
+
+Le glisser-déposer du bloc `calendar` (tâche #36) a sa propre couverture :
+`test_calendar_generates_state_route_and_navbar_link` vérifie le code
+généré (`NovaDnd`, `on_drag_start`/`on_drag_over`/`on_drop`, chip de
+création rapide) ; `test_calendar_quick_create_chip_omitted_when_entity_has_other_required_field`,
+`..._has_belongs_to` et `..._chip_present_when_extra_field_has_default`
+couvrent la décision de génération du chip (`_calendar_quick_create_safe`,
+testée aussi directement par `test_calendar_quick_create_safe_helper_unit`) ;
+et `test_chart_frontend_module_actually_imports_and_builds_all_pages`
+appelle réellement `drop_on_day` (déplacement ET création rapide) sur le
+state généré, réseau simulé par un faux client httpx qui enregistre les
+appels — vérifiant la résolution du premier événement du jour source, la
+préservation de l'heure pour `date_heure`, et la construction exacte du
+payload envoyé au backend (`entité Rappel`, calendrier `Rappels`, non
+protégée pour ce test précis : `get_state(AuthState)` a besoin d'un
+contexte de requête Reflex actif, absent d'un state instancié
+directement).
 
 ---
 

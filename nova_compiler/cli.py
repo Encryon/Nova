@@ -5,11 +5,13 @@ CLI `nova` — interface en ligne de commande du framework NOVA.
     nova check app.nova                  # valide la syntaxe sans générer
     nova compile app.nova -o build/      # génère backend/frontend/docker/k8s
     nova run app.nova                    # compile puis lance via docker compose
+    nova migrate app.nova -o build/      # compile puis alembic revision --autogenerate + upgrade head (SQL uniquement)
 """
 
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -124,6 +126,69 @@ def compile(
     console.print(f"[green]✓[/green] {len(written)} fichiers générés dans / files generated in [bold]{output}[/bold]")
     for f in sorted(written):
         console.print(f"  {f}")
+
+
+@app.command()
+def migrate(
+    source: Path = typer.Argument(..., exists=True, help="Fichier .nova source"),
+    output: Path = typer.Option(Path("build"), "-o", "--output", help="Dossier de sortie"),
+    message: str = typer.Option(
+        "auto", "-m", "--message", help="Message de la migration Alembic / Alembic migration message"
+    ),
+):
+    """Compile le projet (SQL uniquement), puis génère une migration Alembic
+    par autogénération (`alembic revision --autogenerate`) à partir du
+    schéma courant et l'applique (`alembic upgrade head`) — mêmes
+    hypothèses que `nova run` pour `docker compose` : l'outil (ici
+    `alembic`, tiré par `backend/requirements.txt`) doit être installé dans
+    l'environnement Python qui exécute cette commande.
+
+    `backend/migrations/` (config Alembic + historique des révisions) est
+    généré une seule fois par `nova compile` (voir
+    `codegen.api_fastapi.generate_backend_scaffold`) et jamais réécrit
+    ensuite : chaque appel à `nova migrate` ajoute une nouvelle révision à
+    cet historique plutôt que de repartir de zéro."""
+    try:
+        program = parse_file(source)
+    except NovaSyntaxError as exc:
+        console.print(f"[red]✗ Erreur de syntaxe / Syntax error[/red]\n{exc}")
+        raise typer.Exit(code=1)
+
+    if program.database_engine() == "mongodb":
+        console.print(
+            "[red]✗[/red] `nova migrate` ne s'applique qu'aux bases SQL / "
+            "only applies to SQL databases — MongoDB/Beanie (`database: "
+            "mongodb`) n'a pas de schéma figé à migrer / has no fixed "
+            "schema to migrate."
+        )
+        raise typer.Exit(code=1)
+
+    written = generate_project(program, output, source_dir=source.parent)
+    console.print(f"[green]✓[/green] {len(written)} fichiers générés dans / files generated in [bold]{output}[/bold]")
+
+    backend_dir = output / "backend"
+    alembic_cmd = [sys.executable, "-m", "alembic"]
+
+    console.print(f'[cyan]→[/cyan] alembic revision --autogenerate -m "{message}"')
+    revision = subprocess.run(
+        [*alembic_cmd, "revision", "--autogenerate", "-m", message],
+        cwd=backend_dir,
+        capture_output=True,
+        text=True,
+    )
+    console.print(revision.stdout, end="")
+    if revision.returncode != 0:
+        console.print(f"[red]✗ Échec de la génération de la migration / Migration generation failed[/red]\n{revision.stderr}")
+        raise typer.Exit(code=1)
+
+    console.print("[cyan]→[/cyan] alembic upgrade head")
+    upgrade = subprocess.run([*alembic_cmd, "upgrade", "head"], cwd=backend_dir, capture_output=True, text=True)
+    console.print(upgrade.stdout, end="")
+    if upgrade.returncode != 0:
+        console.print(f"[red]✗ Échec de l'application de la migration / Migration apply failed[/red]\n{upgrade.stderr}")
+        raise typer.Exit(code=1)
+
+    console.print("[green]✓[/green] Migration générée et appliquée / Migration generated and applied")
 
 
 @app.command()

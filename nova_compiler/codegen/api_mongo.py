@@ -35,16 +35,22 @@ from __future__ import annotations
 from ..ast_nodes import Entity, NovaProgram
 from .api_fastapi import (
     _HEADER,
+    _calendar_ics_slug,
+    _format_query_value,
     _generate_emailer,
+    _has_many_relation_info,
     _has_uploads,
+    _ICS_ESCAPE_HELPER,
     _model_class_name,
+    _multilingual_column_names,
     _multilingual_model_lines,
     _multilingual_schema_lines,
+    _relation_display_field,
     _table_name,
     _UPLOADS_ROUTER_TEMPLATE,
     _validation_check_lines,
 )
-from .utils import PY_TYPE_MAP, to_snake_case
+from .utils import PY_TYPE_MAP, to_pascal_case, to_snake_case
 
 
 def _mongo_field_line(f) -> str:
@@ -97,9 +103,6 @@ def _generate_mongo_models(program: NovaProgram) -> str:
     for entity in program.entities:
         cls = _model_class_name(entity)
         table = _table_name(entity)
-        # `has_many` est rejeté à la compilation pour ce backend (voir
-        # parser._validate_mongo_unsupported_features) : seul `belongs_to`
-        # peut apparaître ici.
         fk_field_names = [to_snake_case(rel.target) + "_id" for rel in entity.relations if rel.kind == "belongs_to"]
 
         lines.append(f"class {cls}(Document):")
@@ -145,6 +148,29 @@ def _generate_mongo_models(program: NovaProgram) -> str:
             lines.append(f"    {fk_name}: Optional[str] = None")
         lines.append("")
         lines.append("")
+
+        # Schéma de lecture supplémentaire pour les entités portant au moins
+        # un `has_many` (tâche #34) : même rôle que `{cls}Read(SQLModel)`
+        # côté backend SQL (voir api_fastapi.py) — `id` est ici `Optional[
+        # str]` (pas `int`) puisque `_generate_mongo_router` convertit
+        # explicitement l'ObjectId Beanie en chaîne avant de construire ce
+        # dict (voir son commentaire sur `data["id"] = str(item.id)`).
+        has_many_info = _has_many_relation_info(entity, program)
+        if has_many_info:
+            lines.append(f"class {cls}Read(BaseModel):")
+            lines.append("    id: Optional[str] = None")
+            for f in entity.fields:
+                if f.multilingual:
+                    lines += [f"    {col}: Optional[str] = None" for col in _multilingual_column_names(f, active_langs)]
+                    continue
+                py_type = PY_TYPE_MAP.get(f.type, "str") if not f.is_reference else "str"
+                lines.append(f"    {to_snake_case(f.name)}: Optional[{py_type}] = None")
+            for fk_name in fk_field_names:
+                lines.append(f"    {fk_name}: Optional[str] = None")
+            for _child_cls, _child_table, _fk_col, text_field, _display_attr in has_many_info:
+                lines.append(f'    {text_field}: str = ""')
+            lines.append("")
+            lines.append("")
 
     return "\n".join(lines) + "\n"
 
@@ -387,6 +413,7 @@ def _generate_mongo_router(
         return extra
 
     has_unique_field = any(f.unique for f in entity.fields)
+    has_many_info = _mongo_has_many_relation_info(entity, program) if program is not None else []
     lines = [
         _HEADER,
         "from __future__ import annotations",
@@ -421,31 +448,100 @@ def _generate_mongo_router(
         "",
     ]
 
+    def _related_text_lines(indent: str, item_expr: str) -> list[str]:
+        # Équivalent Mongo de `api_fastapi._generate_router._related_text_
+        # lines` : une requête Motor par relation `has_many`, filtrée sur
+        # la clé étrangère (stockée comme `Optional[str]` côté enfant, voir
+        # `_generate_mongo_models`) — `str(...)` convertit explicitement
+        # l'ObjectId Beanie de `item_expr.id` en la même représentation
+        # texte que celle écrite dans ce champ à la création (voir
+        # `create_<var>` : le payload `<parent>_id` arrive déjà en chaîne
+        # depuis le client, JSON ne connaissant pas ObjectId).
+        out = []
+        for child_cls, child_table, fk_col, text_field, display_attr in has_many_info:
+            related_var = f"related_{child_table}"
+            out.append(
+                f"{indent}{related_var} = await models.{child_cls}.find("
+                f"models.{child_cls}.{fk_col} == str({item_expr}.id)).to_list()"
+            )
+            out.append(
+                f'{indent}data["{text_field}"] = ", ".join(str(getattr(c, "{display_attr}")) for c in {related_var})'
+            )
+        return out
+
+    if has_many_info:
+        lines[lines.index(f"from ..models import {cls}, {cls}Create, {cls}Update")] = (
+            f"from ..models import {cls}, {cls}Create, {cls}Read, {cls}Update"
+        )
+        lines.insert(lines.index(f"from ..models import {cls}, {cls}Create, {cls}Read, {cls}Update") + 1, "from .. import models")
+
     if "list" in actions:
-        lines += [
-            f'@router.get("/", response_model=list[{cls}], response_model_by_alias=False)',
-            f"async def list_{table}():",
-            f'    """list / liste — retourne tous les {tag}."""',
-            f"    return await {cls}.find_all().to_list()",
-            "",
-            "",
-        ]
+        if has_many_info:
+            lines += [
+                f'@router.get("/", response_model=list[{cls}Read], response_model_by_alias=False)',
+                f"async def list_{table}():",
+                f'    """list / liste — retourne tous les {tag}, avec un résumé texte '
+                f'des enregistrements liés ({", ".join(t for _c, _t, _f, t, _d in has_many_info)})."""',
+                f"    items = await {cls}.find_all().to_list()",
+                "    result = []",
+                "    for item in items:",
+                "        data = item.model_dump()",
+                "        data[\"id\"] = str(item.id)",
+            ]
+            lines += _related_text_lines("        ", "item")
+            lines += [
+                "        result.append(data)",
+                "    return result",
+                "",
+                "",
+            ]
+        else:
+            lines += [
+                f'@router.get("/", response_model=list[{cls}], response_model_by_alias=False)',
+                f"async def list_{table}():",
+                f'    """list / liste — retourne tous les {tag}."""',
+                f"    return await {cls}.find_all().to_list()",
+                "",
+                "",
+            ]
 
     if "get" in actions:
-        lines += [
-            f'@router.get("/{{item_id}}", response_model={cls}, response_model_by_alias=False)',
-            f"async def get_{var}(item_id: str):",
-            f'    """get / obtenir / lire — retourne un {tag} par id."""',
-            "    try:",
-            f"        item = await {cls}.get(item_id)",
-            "    except Exception:",
-            "        item = None",
-            "    if item is None:",
-            f'        raise HTTPException(status_code=404, detail="{tag} not found")',
-            "    return item",
-            "",
-            "",
-        ]
+        if has_many_info:
+            lines += [
+                f'@router.get("/{{item_id}}", response_model={cls}Read, response_model_by_alias=False)',
+                f"async def get_{var}(item_id: str):",
+                f'    """get / obtenir / lire — retourne un {tag} par id, avec un résumé '
+                f'texte des enregistrements liés."""',
+                "    try:",
+                f"        item = await {cls}.get(item_id)",
+                "    except Exception:",
+                "        item = None",
+                "    if item is None:",
+                f'        raise HTTPException(status_code=404, detail="{tag} not found")',
+                "    data = item.model_dump()",
+                "    data[\"id\"] = str(item.id)",
+            ]
+            lines += _related_text_lines("    ", "item")
+            lines += [
+                "    return data",
+                "",
+                "",
+            ]
+        else:
+            lines += [
+                f'@router.get("/{{item_id}}", response_model={cls}, response_model_by_alias=False)',
+                f"async def get_{var}(item_id: str):",
+                f'    """get / obtenir / lire — retourne un {tag} par id."""',
+                "    try:",
+                f"        item = await {cls}.get(item_id)",
+                "    except Exception:",
+                "        item = None",
+                "    if item is None:",
+                f'        raise HTTPException(status_code=404, detail="{tag} not found")',
+                "    return item",
+                "",
+                "",
+            ]
 
     if "create" in actions:
         lines += [
@@ -601,6 +697,10 @@ def _generate_mongo_main(program: NovaProgram) -> str:
         lines.append("from .auth import router as auth_router")
     if has_uploads:
         lines.append("from .routers._uploads import router as uploads_router, UPLOADS_DIR")
+    if program.queries:
+        lines.append("from .routers._requetes import router as requetes_router")
+    if program.calendars:
+        lines.append("from .routers._ics import router as ics_router")
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
@@ -631,6 +731,10 @@ def _generate_mongo_main(program: NovaProgram) -> str:
         lines.append("app.include_router(auth_router)")
     if has_uploads:
         lines.append("app.include_router(uploads_router)")
+    if program.queries:
+        lines.append("app.include_router(requetes_router)")
+    if program.calendars:
+        lines.append("app.include_router(ics_router)")
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
@@ -710,6 +814,163 @@ async def exemple_requete_complexe():
 '''
 
 
+def _generate_mongo_query_router(program: NovaProgram) -> str:
+    """Équivalent Mongo de `api_fastapi._generate_query_router` (tâche
+    #34) : filtre/`ou:`/tri/limite traduits en filtres Beanie (qui
+    supportent nativement les mêmes opérateurs Python que SQLAlchemy sur
+    un attribut de `Document` — `Cls.champ > valeur`, etc. — voir
+    https://beanie-odm.dev), pas en agrégation Mongo brute. Les jointures
+    (`jointure:`) ne sont PAS supportées ici (voir
+    `parser._validate_mongo_unsupported_features`) : `Query.joins` est
+    donc toujours vide pour tout programme qui atteint cette fonction."""
+    has_or_groups = any(q.filter_groups for q in program.queries)
+    lines = [
+        _HEADER,
+        "from __future__ import annotations",
+        "",
+        "from fastapi import APIRouter",
+    ]
+    if has_or_groups:
+        lines.append("from beanie.operators import Or")
+    lines += [
+        "",
+        "from .. import models",
+        "",
+        'router = APIRouter(prefix="/requetes", tags=["requetes"])',
+        "",
+        "",
+    ]
+    for q in program.queries:
+        entity = program.get_entity(q.entity)
+        cls = to_pascal_case(entity.name) if entity else to_pascal_case(q.entity)
+        slug = to_snake_case(q.name).replace("_", "-")
+        fn_name = to_snake_case(q.name)
+        lines += [
+            f'@router.get("/{slug}", response_model=list[models.{cls}], response_model_by_alias=False)',
+            f"async def {fn_name}():",
+            f'    """Requête déclarative `requete {q.name} sur {q.entity} {{ ... }}` du fichier .nova (backend NoSQL)."""',
+            "    conditions = []",
+        ]
+        for f in q.filters:
+            snake = to_snake_case(f.field)
+            lines.append(f"    conditions.append(models.{cls}.{snake} {f.op} {_format_query_value(f.value)})")
+        for group in q.filter_groups:
+            or_terms = ", ".join(
+                f"models.{cls}.{to_snake_case(f.field)} {f.op} {_format_query_value(f.value)}"
+                for f in group.filters
+            )
+            lines.append(f"    conditions.append(Or({or_terms}))")
+        lines.append(f"    query = models.{cls}.find(*conditions)")
+        if q.order_by:
+            snake = to_snake_case(q.order_by)
+            sign = "-" if q.order_dir == "desc" else "+"
+            lines.append(f"    query = query.sort({sign}models.{cls}.{snake})")
+        if q.limit is not None:
+            lines.append(f"    query = query.limit({q.limit})")
+        lines += [
+            "    return await query.to_list()",
+            "",
+            "",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _mongo_has_many_relation_info(entity: Entity, program: NovaProgram):
+    """Comme `api_fastapi._has_many_relation_info` (même forme de tuple),
+    réutilisée telle quelle (elle ne dépend d'aucun mécanisme SQL — seul
+    le nom des champs/collections lui importe) : voir _has_many_relation_
+    info importé plus haut. Cette fonction est un simple alias pour que le
+    nom apparaisse explicitement dans ce module côté lisibilité/tests."""
+    return _has_many_relation_info(entity, program)
+
+
+def _generate_mongo_calendar_ics_router(program: NovaProgram) -> str:
+    """Équivalent Mongo de `api_fastapi._generate_calendar_ics_router`
+    (tâche #34) : même format iCalendar (RFC 5545) produit par de simples
+    f-strings, mais lecture asynchrone via `Document.find_all()` (Motor)
+    au lieu de `Session.exec(select(...))` (SQLAlchemy)."""
+    lines = [
+        _HEADER,
+        "from __future__ import annotations",
+        "",
+        "from datetime import datetime, timezone",
+        "",
+        "from fastapi import APIRouter, Depends, Response",
+        "",
+        "from .. import models",
+    ]
+    cal_roles: dict[str, str | None] = {}
+    for cal in program.calendars:
+        api = next((a for a in program.apis if a.entity == cal.entity), None)
+        cal_roles[cal.name] = api.protected_role if api else None
+    if any(cal_roles.values()):
+        lines.append("from ..auth import require_role")
+    lines.append(_ICS_ESCAPE_HELPER)
+    lines += [
+        'router = APIRouter(prefix="/ics", tags=["calendriers"])',
+        "",
+        "",
+    ]
+    for cal in program.calendars:
+        entity = program.get_entity(cal.entity)
+        if entity is None:
+            continue
+        cls = _model_class_name(entity)
+        slug = _calendar_ics_slug(cal)
+        fn_name = to_snake_case(cal.name)
+        date_field_snake = to_snake_case(cal.date_field)
+        title_field_snake = to_snake_case(cal.title_field) if cal.title_field else None
+        date_field_obj = next((f for f in entity.fields if f.name == cal.date_field), None)
+        is_datetime = bool(date_field_obj and date_field_obj.type == "datetime")
+        role = cal_roles.get(cal.name)
+        route_decorator = f'@router.get("/{slug}.ics"'
+        if role:
+            route_decorator += f', dependencies=[Depends(require_role("{role}"))]'
+        route_decorator += ")"
+        title_default = repr(cal.entity)
+        title_expr = (
+            f'_ics_escape(str(getattr(item, "{title_field_snake}", "") or {title_default}))'
+            if title_field_snake
+            else f"_ics_escape({title_default})"
+        )
+        dtstart_expr = (
+            "raw_date.strftime('%Y%m%dT%H%M%SZ')"
+            if is_datetime
+            else "raw_date.strftime('%Y%m%d')"
+        )
+        dtstart_prefix = "DTSTART" if is_datetime else "DTSTART;VALUE=DATE"
+        lines += [
+            route_decorator,
+            f"async def {fn_name}_ics():",
+            f'    """Export iCalendar (.ics) du calendrier `{cal.name}` (source : {cal.entity}, backend NoSQL).',
+            f'    Un événement par enregistrement dont `{cal.date_field}` n\'est pas vide."""',
+            f"    items = await models.{cls}.find_all().to_list()",
+            '    now_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")',
+            "    ics_lines = [",
+            '        "BEGIN:VCALENDAR",',
+            '        "VERSION:2.0",',
+            f'        "PRODID:-//NOVA//{cal.name}//FR",',
+            '        "CALSCALE:GREGORIAN",',
+            "    ]",
+            "    for item in items:",
+            f'        raw_date = getattr(item, "{date_field_snake}", None)',
+            "        if raw_date is None:",
+            "            continue",
+            f"        summary = {title_expr}",
+            '        ics_lines.append("BEGIN:VEVENT")',
+            f'        ics_lines.append(f"UID:{to_snake_case(cal.entity)}-{{item.id}}@nova.local")',
+            '        ics_lines.append(f"DTSTAMP:{now_stamp}")',
+            f'        ics_lines.append(f"{dtstart_prefix}:{{{dtstart_expr}}}")',
+            '        ics_lines.append(f"SUMMARY:{summary}")',
+            '        ics_lines.append("END:VEVENT")',
+            "    ics_lines.append(\"END:VCALENDAR\")",
+            '    return Response(content="\\r\\n".join(ics_lines), media_type="text/calendar")',
+            "",
+            "",
+        ]
+    return "\n".join(lines) + "\n"
+
+
 def generate_backend_mongo(program: NovaProgram) -> dict[str, str]:
     has_auth = program.auth is not None and program.auth.enabled
     has_uploads = _has_uploads(program)
@@ -742,6 +1003,10 @@ def generate_backend_mongo(program: NovaProgram) -> dict[str, str]:
         files["backend/app/routers/_uploads.py"] = _UPLOADS_ROUTER_TEMPLATE
     if has_email:
         files["backend/app/emailer.py"] = _generate_emailer(program)
+    if program.queries:
+        files["backend/app/routers/_requetes.py"] = _generate_mongo_query_router(program)
+    if program.calendars:
+        files["backend/app/routers/_ics.py"] = _generate_mongo_calendar_ics_router(program)
 
     for api in program.apis:
         entity = program.get_entity(api.entity)

@@ -122,29 +122,68 @@ def _has_many_relation_info(entity: Entity, program: NovaProgram):
     return info
 
 
+def _validation_expr_fields(expr) -> list[str]:
+    """Tous les noms de champ (NOVA, pas snake_case) référencés quelque
+    part dans une `ValidationExpr` — utilisé pour générer les gardes
+    `is not None` avant d'évaluer l'expression (voir _validation_check_lines
+    ci-dessous)."""
+    if expr.kind == "field":
+        return [expr.value]
+    if expr.kind in ("call", "binop"):
+        out: list[str] = []
+        for arg in expr.args:
+            out += _validation_expr_fields(arg)
+        return out
+    return []
+
+
+def _validation_expr_to_python(expr) -> str:
+    """Traduit une `ValidationExpr` (voir ast_nodes.py) en expression
+    Python : un champ -> `item.<snake>`, une constante -> son literal, un
+    appel de fonction whitelist (`kw.VALIDATION_FUNCTIONS`, déjà résolu en
+    nom Python natif par le parser : min/max/round/abs) -> l'appel Python
+    équivalent, une somme/différence -> l'opération Python équivalente
+    (parenthésée pour préserver l'associativité gauche du parser)."""
+    if expr.kind == "number":
+        return repr(expr.value)
+    if expr.kind == "field":
+        return f"item.{to_snake_case(expr.value)}"
+    if expr.kind == "call":
+        args = ", ".join(_validation_expr_to_python(a) for a in expr.args)
+        return f"{expr.value}({args})"
+    if expr.kind == "binop":
+        left, right = expr.args
+        return f"({_validation_expr_to_python(left)} {expr.value} {_validation_expr_to_python(right)})"
+    raise ValueError(f"ValidationExpr.kind inconnu : {expr.kind!r}")  # pragma: no cover
+
+
 def _validation_check_lines(entity: Entity, program: NovaProgram, indent: str = "    ") -> list[str]:
     """Lignes Python vérifiant chaque `validation <Nom> sur <Entite> {
     regle: ... message: "..." }` ciblant cette entité (voir
-    `parser._validate_validations`, qui garantit que les deux champs de
-    chaque règle existent et sont d'un type comparable) — insérées après
-    que `item` porte l'état final de l'enregistrement (juste avant
-    `session.add(item)`, aussi bien en `create` qu'en `update` : en update,
-    APRÈS la boucle `setattr` qui applique le payload, pour valider l'état
-    RÉSULTANT, pas seulement les champs modifiés). Une valeur `None` sur
-    l'un des deux champs (champ optionnel non renseigné) désactive
+    `parser._validate_validations`, qui garantit que chaque expression est
+    bien formée et que les champs qui y participent sont d'un type
+    comparable/numérique) — insérées après que `item` porte l'état final de
+    l'enregistrement (juste avant `session.add(item)`, aussi bien en
+    `create` qu'en `update` : en update, APRÈS la boucle `setattr` qui
+    applique le payload, pour valider l'état RÉSULTANT, pas seulement les
+    champs modifiés). Une valeur `None` sur N'IMPORTE LEQUEL des champs
+    référencés par l'expression (champ optionnel non renseigné) désactive
     silencieusement la règle plutôt que de lever une TypeError sur une
-    comparaison avec `None`."""
+    comparaison/opération arithmétique avec `None`."""
     out = []
     for validation in program.validations:
         if validation.entity != entity.name:
             continue
         for rule in validation.rules:
-            a = to_snake_case(rule.field_a)
-            b = to_snake_case(rule.field_b)
-            out.append(
-                f"{indent}if item.{a} is not None and item.{b} is not None "
-                f"and not (item.{a} {rule.op} item.{b}):"
-            )
+            # dict.fromkeys plutôt que set() : préserve l'ordre d'apparition
+            # (expr_a puis expr_b, comportement historique inchangé pour une
+            # règle à deux champs nus) tout en dédupliquant un champ répété.
+            fields = list(dict.fromkeys(_validation_expr_fields(rule.expr_a) + _validation_expr_fields(rule.expr_b)))
+            none_guard = " and ".join(f"item.{to_snake_case(f)} is not None" for f in fields)
+            condition = f"not ({_validation_expr_to_python(rule.expr_a)} {rule.op} {_validation_expr_to_python(rule.expr_b)})"
+            if none_guard:
+                condition = f"{none_guard} and {condition}"
+            out.append(f"{indent}if {condition}:")
             out.append(f'{indent}    raise HTTPException(status_code=422, detail={rule.message!r})')
     return out
 
@@ -292,6 +331,33 @@ def get_session() -> Iterator[Session]:
 '''
 
 
+def _template_field_names(entity: Entity, program: NovaProgram) -> list[str]:
+    """Noms (snake_case) de tous les champs substituables dans un template
+    email externe (`email {{ template: "..." }}`, tâche #37) pour cette
+    entité — `{{champ}}` dans le fichier .html référencé est remplacé par
+    `item.<champ>` (ou la valeur capturée avant suppression pour `delete`,
+    voir `_generate_router`) au moment de l'envoi. Reprend exactement les
+    mêmes conventions de nommage que `_generate_models` : un champ
+    multilingue devient une colonne par langue ACTIVE du projet, une
+    référence directe (`champ x: AutreEntite`) ou une relation `belongs_to`
+    explicite devient `<cible>_id`."""
+    active_langs = program.active_languages()
+    names: list[str] = []
+    for f in entity.fields:
+        if f.multilingual:
+            names += _multilingual_column_names(f, active_langs)
+        elif f.is_reference:
+            names.append(f"{to_snake_case(f.name)}_id")
+        else:
+            names.append(to_snake_case(f.name))
+    for rel in entity.relations:
+        if rel.kind == "belongs_to":
+            fk = f"{to_snake_case(rel.target)}_id"
+            if fk not in names:
+                names.append(fk)
+    return names
+
+
 def _generate_router(
     entity: Entity,
     actions: list[str],
@@ -353,10 +419,17 @@ def _generate_router(
     lines.append(f"from ..models import {', '.join(model_imports)}")
     if protected_role:
         lines.append("from ..auth import require_role")
+    uses_template = bool(notify_actions and program is not None and program.email and program.email.template)
     if notify_actions:
         # `notifier: ...` sur `api {entity.name} { ... }` (nécessite un bloc
         # `email { ... }` — validé à la compilation, voir parser.py).
-        lines.append("from ..emailer import send_email")
+        # `email { template: ... }` (tâche #37) : importe aussi
+        # `render_email_template`, seule différence entre les deux modes
+        # (voir les blocs `notify_kwargs` plus bas dans ce fichier).
+        if uses_template:
+            lines.append("from ..emailer import render_email_template, send_email")
+        else:
+            lines.append("from ..emailer import send_email")
     if attachment_snake:
         # `piece_jointe: {notify_attachment_field}` : le champ est validé
         # `file`/`image` (parser.py::_validate_notifiers), donc le routeur
@@ -470,15 +543,26 @@ def _generate_router(
                 f"item.{recipient_snake}" if recipient_snake else None,
                 f"item.{attachment_snake}" if attachment_snake else None,
             )
-            lines.append(
-                f'    send_email(\n'
-                f'        subject="[NOVA] Nouveau {tag} / New {tag}",\n'
-                f'        body=f"{tag} #{{item.id}} créé / created.",\n'
-                f'        html_body=f"""<html><body style="font-family:sans-serif">'
-                f'<h2 style="color:#7c66dc">[NOVA] Nouveau {tag} / New {tag}</h2>'
-                f'<p>{tag} #{{item.id}} créé / created.</p></body></html>"""{notify_kwargs},\n'
-                f'    )'
-            )
+            if uses_template:
+                field_names = _template_field_names(entity, program)
+                values_expr = ", ".join(
+                    ['"action": "created"', f'"entity": "{tag}"', '"id": item.id']
+                    + [f'"{f}": item.{f}' for f in field_names]
+                )
+                lines.append(
+                    f'    subject, html_body, text_body = render_email_template({{{values_expr}}})\n'
+                    f'    send_email(subject=subject, body=text_body, html_body=html_body{notify_kwargs})'
+                )
+            else:
+                lines.append(
+                    f'    send_email(\n'
+                    f'        subject="[NOVA] Nouveau {tag} / New {tag}",\n'
+                    f'        body=f"{tag} #{{item.id}} créé / created.",\n'
+                    f'        html_body=f"""<html><body style="font-family:sans-serif">'
+                    f'<h2 style="color:#7c66dc">[NOVA] Nouveau {tag} / New {tag}</h2>'
+                    f'<p>{tag} #{{item.id}} créé / created.</p></body></html>"""{notify_kwargs},\n'
+                    f'    )'
+                )
         lines += [
             "    return item",
             "",
@@ -507,15 +591,26 @@ def _generate_router(
                 f"item.{recipient_snake}" if recipient_snake else None,
                 f"item.{attachment_snake}" if attachment_snake else None,
             )
-            lines.append(
-                f'    send_email(\n'
-                f'        subject="[NOVA] {tag} modifié / updated",\n'
-                f'        body=f"{tag} #{{item.id}} mis à jour / updated.",\n'
-                f'        html_body=f"""<html><body style="font-family:sans-serif">'
-                f'<h2 style="color:#7c66dc">[NOVA] {tag} modifié / updated</h2>'
-                f'<p>{tag} #{{item.id}} mis à jour / updated.</p></body></html>"""{notify_kwargs},\n'
-                f'    )'
-            )
+            if uses_template:
+                field_names = _template_field_names(entity, program)
+                values_expr = ", ".join(
+                    ['"action": "updated"', f'"entity": "{tag}"', '"id": item.id']
+                    + [f'"{f}": item.{f}' for f in field_names]
+                )
+                lines.append(
+                    f'    subject, html_body, text_body = render_email_template({{{values_expr}}})\n'
+                    f'    send_email(subject=subject, body=text_body, html_body=html_body{notify_kwargs})'
+                )
+            else:
+                lines.append(
+                    f'    send_email(\n'
+                    f'        subject="[NOVA] {tag} modifié / updated",\n'
+                    f'        body=f"{tag} #{{item.id}} mis à jour / updated.",\n'
+                    f'        html_body=f"""<html><body style="font-family:sans-serif">'
+                    f'<h2 style="color:#7c66dc">[NOVA] {tag} modifié / updated</h2>'
+                    f'<p>{tag} #{{item.id}} mis à jour / updated.</p></body></html>"""{notify_kwargs},\n'
+                    f'    )'
+                )
         lines += [
             "    return item",
             "",
@@ -540,6 +635,14 @@ def _generate_router(
                 lines.append(f"    deleted_to = item.{recipient_snake}")
             if attachment_snake:
                 lines.append(f"    deleted_attachment = item.{attachment_snake}")
+            if uses_template:
+                # `item` expire après `session.commit()` ci-dessous : tous
+                # les champs substituables sont donc capturés maintenant
+                # dans un dict, en plus de deleted_id/deleted_to/
+                # deleted_attachment ci-dessus (voir _template_field_names).
+                field_names = _template_field_names(entity, program)
+                deleted_values_expr = ", ".join(f'"{f}": item.{f}' for f in field_names)
+                lines.append(f"    deleted_values = {{{deleted_values_expr}}}")
         lines += [
             "    session.delete(item)",
             "    session.commit()",
@@ -549,15 +652,24 @@ def _generate_router(
                 "deleted_to" if recipient_snake else None,
                 "deleted_attachment" if attachment_snake else None,
             )
-            lines.append(
-                f'    send_email(\n'
-                f'        subject="[NOVA] {tag} supprimé / deleted",\n'
-                f'        body=f"{tag} #{{deleted_id}} supprimé / deleted.",\n'
-                f'        html_body=f"""<html><body style="font-family:sans-serif">'
-                f'<h2 style="color:#7c66dc">[NOVA] {tag} supprimé / deleted</h2>'
-                f'<p>{tag} #{{deleted_id}} supprimé / deleted.</p></body></html>"""{notify_kwargs},\n'
-                f'    )'
-            )
+            if uses_template:
+                values_expr = (
+                    f'"action": "deleted", "entity": "{tag}", "id": deleted_id, **deleted_values'
+                )
+                lines.append(
+                    f'    subject, html_body, text_body = render_email_template({{{values_expr}}})\n'
+                    f'    send_email(subject=subject, body=text_body, html_body=html_body{notify_kwargs})'
+                )
+            else:
+                lines.append(
+                    f'    send_email(\n'
+                    f'        subject="[NOVA] {tag} supprimé / deleted",\n'
+                    f'        body=f"{tag} #{{deleted_id}} supprimé / deleted.",\n'
+                    f'        html_body=f"""<html><body style="font-family:sans-serif">'
+                    f'<h2 style="color:#7c66dc">[NOVA] {tag} supprimé / deleted</h2>'
+                    f'<p>{tag} #{{deleted_id}} supprimé / deleted.</p></body></html>"""{notify_kwargs},\n'
+                    f'    )'
+                )
         lines += [
             "    return None",
             "",
@@ -855,6 +967,28 @@ def _format_query_value(value) -> str:
     return repr(value)
 
 
+def _query_entity_scope(program: NovaProgram, q) -> dict[str, str]:
+    """Nom d'entité NOVA -> classe SQLModel (PascalCase) pour l'entité
+    principale de la requête et chacune de ses `jointure:` (voir
+    ast_nodes.Query.joins) — utilisé pour résoudre un champ qualifié
+    (`"Client.pays"`) comme un champ non qualifié (`"pays"`, résolu contre
+    l'entité principale, comportement historique inchangé)."""
+    scope = {q.entity: to_pascal_case(q.entity)}
+    for j in q.joins:
+        scope[j.entity] = to_pascal_case(j.entity)
+    return scope
+
+
+def _query_field_expr(scope: dict[str, str], default_entity: str, qualified: str) -> str:
+    if "." in qualified:
+        entity_name, field_name = qualified.split(".", 1)
+    else:
+        entity_name, field_name = default_entity, qualified
+    cls = scope[entity_name]
+    snake = "id" if field_name == "id" else to_snake_case(field_name)
+    return f"models.{cls}.{snake}"
+
+
 def _generate_query_router(program: NovaProgram) -> str:
     # `filtre:` de premier niveau -> combinés par ET (autant d'appels
     # `.where()` chaînés, comportement historique inchangé). Un bloc
@@ -863,7 +997,20 @@ def _generate_query_router(program: NovaProgram) -> str:
     # `WHERE f1 AND f2 AND (g1a OR g1b) AND (g2a OR g2b OR g2c)`. L'import
     # `or_` n'est ajouté que si au moins une requête du programme a un
     # groupe `ou:`, pour ne pas polluer le fichier généré sinon.
+    #
+    # `jointure: <Entite> sur <local> = <distant>` (Query.joins) -> un
+    # `select()` portant plusieurs entités + `.join(Cls, onclause)` par
+    # jointure déclarée, dans l'ordre où elles apparaissent dans le fichier
+    # .nova (une jointure peut référencer une entité jointe précédemment,
+    # pas seulement l'entité principale). `session.exec(...)` renvoie alors
+    # des tuples (Row) plutôt que des instances uniques : la route sérialise
+    # chaque ligne en dict, l'entité principale à plat et chaque entité
+    # jointe sous une clé nommée d'après son nom en snake_case — pas de
+    # `response_model` dans ce cas (une liste de dicts hétérogènes selon la
+    # requête, contrairement au cas sans jointure où `response_model=
+    # list[models.<Cls>]` reste précis et documenté dans /docs).
     has_or_groups = any(q.filter_groups for q in program.queries)
+    has_joins = any(q.joins for q in program.queries)
     lines = [
         _HEADER,
         "from __future__ import annotations",
@@ -885,34 +1032,61 @@ def _generate_query_router(program: NovaProgram) -> str:
     for q in program.queries:
         entity = program.get_entity(q.entity)
         cls = to_pascal_case(entity.name) if entity else to_pascal_case(q.entity)
+        scope = _query_entity_scope(program, q)
         slug = to_snake_case(q.name).replace("_", "-")
         fn_name = to_snake_case(q.name)
+        response_model = "" if q.joins else f", response_model=list[models.{cls}]"
         lines += [
-            f'@router.get("/{slug}", response_model=list[models.{cls}])',
+            f'@router.get("/{slug}"{response_model})',
             f"def {fn_name}(session: Session = Depends(get_session)):",
             f'    """Requête déclarative `requete {q.name} sur {q.entity} {{ ... }}` du fichier .nova."""',
-            f"    query = select(models.{cls})",
         ]
+        if q.joins:
+            select_targets = ", ".join(f"models.{scope[e]}" for e in [q.entity] + [j.entity for j in q.joins])
+            lines.append(f"    query = select({select_targets})")
+            for j in q.joins:
+                local_expr = _query_field_expr(scope, q.entity, j.local_field)
+                remote_expr = _query_field_expr(scope, q.entity, j.remote_field)
+                lines.append(f"    query = query.join(models.{scope[j.entity]}, {local_expr} == {remote_expr})")
+        else:
+            lines.append(f"    query = select(models.{cls})")
         for f in q.filters:
-            snake = to_snake_case(f.field)
-            lines.append(f"    query = query.where(models.{cls}.{snake} {f.op} {_format_query_value(f.value)})")
+            col = _query_field_expr(scope, q.entity, f.field)
+            lines.append(f"    query = query.where({col} {f.op} {_format_query_value(f.value)})")
         for group in q.filter_groups:
             or_terms = ", ".join(
-                f"models.{cls}.{to_snake_case(f.field)} {f.op} {_format_query_value(f.value)}"
+                f"{_query_field_expr(scope, q.entity, f.field)} {f.op} {_format_query_value(f.value)}"
                 for f in group.filters
             )
             lines.append(f"    query = query.where(or_({or_terms}))")
         if q.order_by:
-            snake = to_snake_case(q.order_by)
+            col = _query_field_expr(scope, q.entity, q.order_by)
             direction = "desc" if q.order_dir == "desc" else "asc"
-            lines.append(f"    query = query.order_by(models.{cls}.{snake}.{direction}())")
+            lines.append(f"    query = query.order_by({col}.{direction}())")
         if q.limit is not None:
             lines.append(f"    query = query.limit({q.limit})")
-        lines += [
-            "    return session.exec(query).all()",
-            "",
-            "",
-        ]
+        if q.joins:
+            lines += [
+                "    rows = session.exec(query).all()",
+                "    result = []",
+                "    for row in rows:",
+                f"        item = row[0].model_dump()",
+            ]
+            for idx, j in enumerate(q.joins, start=1):
+                key = to_snake_case(j.entity)
+                lines.append(f'        item["{key}"] = row[{idx}].model_dump()')
+            lines += [
+                "        result.append(item)",
+                "    return result",
+                "",
+                "",
+            ]
+        else:
+            lines += [
+                "    return session.exec(query).all()",
+                "",
+                "",
+            ]
     return "\n".join(lines) + "\n"
 
 
@@ -925,7 +1099,7 @@ def _generate_emailer(program: NovaProgram) -> str:
     ici : NOVA_SMTP_PASSWORD est la seule source possible."""
     email = program.email or _Email()
     tls_default = "true" if email.tls else "false"
-    return (
+    content = (
         _HEADER
         + f'''
 from __future__ import annotations
@@ -1033,6 +1207,63 @@ def send_email(
         logger.warning("NOVA email: envoi échoué (%s) — notification ignorée.", exc)
 '''
     )
+    if email.template:
+        content += _EMAIL_TEMPLATE_BLOCK
+    return content
+
+
+# `email {{ template: "chemin/vers/fichier.html" }}` (tâche #37) : template
+# HTML externe personnalisable, alternative au sujet/corps codés en dur
+# ci-dessus (`send_email(subject="[NOVA] ...", html_body=f"""...""")` dans
+# `_generate_router`). Bloc AJOUTÉ à la suite du contenu ci-dessus (jamais
+# fusionné dans le même f-string : les `{{`/`}}` de la regex/f-string
+# générées ci-dessous entreraient en collision avec les accolades de
+# formatage de l'f-string de `_generate_emailer`) — chaîne brute (r'''),
+# écrite telle quelle dans emailer.py, donc sans double-échappement des
+# accolades ni des antislashs des motifs regex.
+_EMAIL_TEMPLATE_BLOCK = r'''
+
+# `email { template: "..." }` : template HTML externe, résolu à la
+# compilation relativement au fichier .nova source puis copié ici (voir
+# nova_compiler.codegen.generate_project — même mécanisme que
+# `application { css: "..." }`), chargé une seule fois au démarrage.
+# Chaque `{{champ}}` du fichier est remplacé par la valeur correspondante
+# de l'enregistrement concerné au moment de l'envoi — voir
+# render_email_template ci-dessous, et app/routers/<entite>.py qui
+# l'appelle à la place du sujet/corps codés en dur plus haut.
+TEMPLATE_PATH = Path(__file__).parent / "email_templates" / "notification.html"
+try:
+    _TEMPLATE_HTML = TEMPLATE_PATH.read_text(encoding="utf-8")
+except OSError:  # pragma: no cover - le fichier est toujours présent en pratique
+    _TEMPLATE_HTML = ""
+
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def render_email_template(values: dict) -> tuple[str, str, str]:
+    """Substitue chaque `{{cle}}` du template HTML externe par
+    str(values.get(cle, "")) — jamais de KeyError : une clé absente du
+    dictionnaire (ou valeur None) devient une chaîne vide plutôt que de
+    faire échouer l'envoi. Dérive ensuite : (1) le sujet — depuis la balise
+    <title>...</title> du HTML déjà substitué si présente (convention :
+    c'est donc là qu'on personnalise le sujet), sinon un repli générique
+    bilingue ; (2) le corps HTML — le template substitué tel quel ; (3) un
+    repli texte brut (balises HTML retirées, lignes vides condensées) pour
+    les clients mail qui n'affichent pas le HTML."""
+    html = _PLACEHOLDER_RE.sub(lambda m: str(values.get(m.group(1)) or ""), _TEMPLATE_HTML)
+    title_match = _TITLE_RE.search(html)
+    if title_match:
+        subject = title_match.group(1).strip()
+    else:
+        action = values.get("action", "")
+        entity = values.get("entity", "Notification")
+        subject = f"[NOVA] {entity} {action}".strip()
+    text_body = _TAG_RE.sub("", html)
+    text_body = re.sub(r"\n\s*\n+", "\n\n", text_body).strip()
+    return subject, html, text_body
+'''
 
 
 def _has_uploads(program: NovaProgram) -> bool:
@@ -1288,7 +1519,12 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
     has_email = program.email is not None
     db_engine = program.database_engine()
 
-    requirements = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "sqlmodel>=0.0.16"]
+    # `alembic` (tâche #38) : toujours présent côté backend SQL — la
+    # structure `backend/migrations/` (voir _ALEMBIC_SCAFFOLD ci-dessous)
+    # est générée systématiquement, que le projet utilise `nova migrate`
+    # ou non (comme `routers_custom/`) ; MongoDB/Beanie (api_mongo.py) n'a
+    # pas de schéma figé à faire migrer et n'en a donc jamais besoin.
+    requirements = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "sqlmodel>=0.0.16", "alembic>=1.13"]
     if db_engine in kw.DB_DRIVER_REQUIREMENTS:
         requirements.append(kw.DB_DRIVER_REQUIREMENTS[db_engine])
     if has_auth:
@@ -1322,6 +1558,20 @@ def generate_backend(program: NovaProgram) -> dict[str, str]:
         files["backend/app/routers/_uploads.py"] = _UPLOADS_ROUTER_TEMPLATE
     if has_email:
         files["backend/app/emailer.py"] = _generate_emailer(program)
+        if program.email and program.email.template:
+            # Réserve l'emplacement attendu par `render_email_template`
+            # (voir _EMAIL_TEMPLATE_BLOCK) ; le *contenu réel* du fichier
+            # référencé par `email { template: "..." }` est copié ici par
+            # `nova_compiler.codegen.generate_project` (qui connaît le
+            # dossier source du .nova) — même mécanisme que `application {
+            # css: "..." }` pour la feuille de style externe.
+            files["backend/app/email_templates/notification.html"] = (
+                "<!-- Remplacé par le contenu du fichier référencé dans\n"
+                f'     `email {{ template: "{program.email.template}" }}` si ce fichier a\n'
+                "     été trouvé au moment de la compilation (voir\n"
+                "     nova_compiler.codegen.generate_project). -->\n"
+                "<html><body><p>{{action}} {{entity}} #{{id}}</p></body></html>\n"
+            )
     for api in program.apis:
         entity = program.get_entity(api.entity)
         if entity is None:
@@ -1410,4 +1660,162 @@ def generate_backend_scaffold() -> dict[str, str]:
     return {
         "backend/app/routers_custom/__init__.py": "",
         "backend/app/routers_custom/example.py": _CUSTOM_ROUTER_EXAMPLE,
+        **_ALEMBIC_SCAFFOLD,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Migrations Alembic (tâche #38) : structure générée UNE SEULE FOIS, comme
+# `routers_custom/` ci-dessus — jamais réécrite par `nova compile`, puisque
+# `migrations/versions/` accumule au fil du temps l'historique réel des
+# migrations appliquées à la base (l'écraser à chaque compilation détruirait
+# cet historique). La commande `nova migrate` (voir cli.py) appelle ensuite
+# `alembic revision --autogenerate` puis `alembic upgrade head` dans ce
+# dossier `backend/` — SQL uniquement : MongoDB/Beanie (voir api_mongo.py,
+# generate_backend_scaffold_mongo) n'a pas de schéma figé à faire migrer.
+# --------------------------------------------------------------------------- #
+
+_ALEMBIC_INI = '''\
+[alembic]
+script_location = migrations
+prepend_sys_path = .
+
+# L'URL de connexion n'est JAMAIS codée en dur ici : `migrations/env.py`
+# (voir ci-dessous) la lit dynamiquement depuis `app.database` (donc depuis
+# NOVA_DATABASE_URL au runtime) — cette ligne reste vide volontairement.
+sqlalchemy.url =
+
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S
+'''
+
+_ALEMBIC_ENV_PY = '''\
+"""env.py Alembic — NE PAS ÉDITER À LA MAIN sauf besoin spécifique : voir
+`backend/app/routers_custom/` pour le mécanisme équivalent côté API. Ce
+fichier fait partie de la structure Alembic générée UNE SEULE FOIS par
+`nova compile` (tâche #38) : contrairement à `app/models.py`, il n'est
+jamais régénéré automatiquement, donc toute modification manuelle ici
+survit aux compilations suivantes.
+
+Réutilise directement l'engine/l'URL de `app/database.py` (donc
+NOVA_DATABASE_URL au runtime, jamais une valeur codée en dur dans
+alembic.ini) et importe `app.models` pour que `SQLModel.metadata`
+connaisse toutes les tables NOVA avant toute autogénération — sans cet
+import, `alembic revision --autogenerate` ne verrait aucune table."""
+
+from __future__ import annotations
+
+from logging.config import fileConfig
+
+from alembic import context
+from sqlmodel import SQLModel
+
+from app import models  # noqa: F401 - peuple SQLModel.metadata
+from app.database import DATABASE_URL, engine
+
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = SQLModel.metadata
+
+
+def run_migrations_offline() -> None:
+    """Génère le SQL sans connexion réelle à la base (`alembic upgrade
+    head --sql`) : utile pour relire/valider une migration avant de
+    l'appliquer en production."""
+    context.configure(
+        url=DATABASE_URL,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Mode par défaut (`alembic upgrade head`, `alembic revision
+    --autogenerate`, ...) : connexion réelle via l'engine SQLModel déjà
+    configuré dans app/database.py."""
+    with engine.connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+'''
+
+_ALEMBIC_SCRIPT_MAKO = '''\
+"""${message}
+
+Revision ID: ${up_revision}
+Revises: ${down_revision | comma,n}
+Create Date: ${create_date}
+
+"""
+from alembic import op
+import sqlalchemy as sa
+import sqlmodel
+${imports if imports else ""}
+
+# revision identifiers, used by Alembic.
+revision = ${repr(up_revision)}
+down_revision = ${repr(down_revision)}
+branch_labels = ${repr(branch_labels)}
+depends_on = ${repr(depends_on)}
+
+
+def upgrade() -> None:
+    ${upgrades if upgrades else "pass"}
+
+
+def downgrade() -> None:
+    ${downgrades if downgrades else "pass"}
+'''
+
+_ALEMBIC_SCAFFOLD = {
+    "backend/alembic.ini": _ALEMBIC_INI,
+    "backend/migrations/env.py": _ALEMBIC_ENV_PY,
+    "backend/migrations/script.py.mako": _ALEMBIC_SCRIPT_MAKO,
+    # Dossier vide au départ (aucune migration n'a encore été générée) :
+    # `.gitkeep` garantit que `migrations/versions/` existe bien avant le
+    # premier `nova migrate` (requis par Alembic) et reste suivi par git
+    # même sans fichier de révision dedans.
+    "backend/migrations/versions/.gitkeep": "",
+}

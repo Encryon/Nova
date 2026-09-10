@@ -192,6 +192,13 @@ CHART_PROP_ALIASES = {
     "eje_y": "y", "y_achse": "y", "asse_y": "y", "eixo_y": "y",
     "titre": "title", "title": "title",
     "titulo": "title", "título": "title", "titel": "title", "titolo": "title",
+    # Agrégation (tâche #35) : regroupe les lignes par `axe_x` puis agrège
+    # `axe_y` avec une fonction de CHART_AGGREGATIONS ci-dessous — voir
+    # codegen/ui_reflex.py::_CHART_AGGREGATE_HELPER pour le calcul.
+    "agregation": "aggregation", "agrégation": "aggregation", "aggregation": "aggregation",
+    "agregacion": "aggregation", "agregación": "aggregation",
+    "aggregierung": "aggregation", "aggregazione": "aggregation",
+    "agregacao": "aggregation", "agregação": "aggregation",
 }
 # Type de graphique : sous-ensemble volontairement restreint de rx.recharts
 # (bar/line/area/pie) — le plus utile pour un tableau de bord simple.
@@ -203,6 +210,12 @@ CHART_TYPES = {
     "radar": "radar", "radial": "radar", "araignee": "radar", "araignée": "radar", "radarchart": "radar",
     "scatter": "scatter", "nuage": "scatter", "nuage_de_points": "scatter", "dispersion": "scatter",
     "streudiagramm": "scatter", "punktdiagramm": "scatter", "dispersao": "scatter", "dispersão": "scatter",
+    # Nouveaux types (tâche #35) : "donut" = anneau (pie avec inner_radius,
+    # voir codegen/ui_reflex.py) ; "funnel" = entonnoir (rx.recharts.funnel_chart).
+    "donut": "donut", "anneau": "donut", "beignet": "donut",
+    "rosquilla": "donut", "dona": "donut", "ciambella": "donut", "rosca": "donut",
+    "funnel": "funnel", "entonnoir": "funnel", "embudo": "funnel",
+    "trichter": "funnel", "imbuto": "funnel", "funil": "funnel",
 }
 # Types de graphique acceptant plusieurs séries (`axe_y` avec plusieurs
 # champs séparés par des virgules) : bar/line/area se prêtent naturellement
@@ -210,6 +223,25 @@ CHART_TYPES = {
 # (un seul jeu de points par rapport à axe_x) n'ont pas de rendu multi-séries
 # simple dans rx.recharts — restreint volontairement, voir _validate_charts.
 CHART_MULTI_SERIES_TYPES = {"bar", "line", "area"}
+
+# Fonction d'agrégation de la propriété `agregation`/`aggregation` du bloc
+# `chart` (tâche #35) : regroupe les lignes par `axe_x` puis agrège chaque
+# champ de `axe_y` — même philosophie de mini-dictionnaire d'alias que
+# VALIDATION_FUNCTIONS plus bas. "count" ignore `axe_y` (compte les lignes
+# du groupe) ; les autres agrègent une valeur numérique par groupe.
+CHART_AGGREGATIONS = {
+    "count": "count", "compte": "count", "nombre": "count", "cantidad": "count",
+    "anzahl": "count", "conteggio": "count", "contagem": "count",
+    "sum": "sum", "somme": "sum", "suma": "sum", "summe": "sum", "soma": "sum",
+    "avg": "avg", "average": "avg", "moyenne": "avg", "promedio": "avg",
+    "durchschnitt": "avg", "media": "avg",
+    "min": "min", "minimum": "min", "mindestens": "min",
+    "max": "max", "maximum": "max", "hoechstens": "max", "höchstens": "max",
+}
+# Valeurs canoniques valides (après résolution des alias ci-dessus) —
+# utilisé par `_validate_charts` (parser.py) pour rejeter une fonction
+# d'agrégation inconnue à la compilation.
+CHART_AGGREGATION_CANONICAL = {"count", "sum", "avg", "min", "max"}
 
 
 # ---- bloc `email { ... }` (configuration SMTP) ---------------------------
@@ -227,6 +259,14 @@ EMAIL_PROP_ALIASES = {
     "destinataire": "to", "to": "to", "destinatario": "to",
     "empfaenger": "to", "empfänger": "to",
     "tls": "tls", "ssl": "tls",
+    # Template HTML externe personnalisable (tâche #37) : chemin d'un
+    # fichier .html, résolu relativement au fichier .nova source — même
+    # mécanisme que `application { css: "..." }` (voir codegen/__init__.py
+    # generate_project). Optionnel : sans lui, comportement historique
+    # inchangé (sujet/corps HTML générés automatiquement).
+    "modele": "template", "modèle": "template", "template": "template",
+    "plantilla": "template", "vorlage": "template", "modello": "template",
+    "modelo": "template",
 }
 
 
@@ -242,6 +282,27 @@ CALENDAR_PROP_ALIASES = {
     "champ_titre": "title_field", "title_field": "title_field",
     "campo_titulo": "title_field", "campo_título": "title_field",
     "titelfeld": "title_field", "campo_titolo": "title_field",
+}
+
+
+# ---- bloc `validation { regle: ... }` (mini-langage d'expression) --------
+# Même philosophie que CHART_PROP_ALIASES/EMAIL_PROP_ALIASES ci-dessus : le
+# nom de fonction dans un appel `regle: min(a, b) > c message: "..."` est un
+# NAME libre résolu ici plutôt qu'un mot-clé de grammaire par langue — un
+# nouveau terminal Lark par fonction et par langue n'apporterait rien (pas
+# de risque d'ambiguïté texte-vs-type comme sur ROLES_KW/FILTRE_KW, voir
+# grammar/nova.lark) et alourdirait la grammaire pour rien. Chaque valeur
+# canonique correspond directement à une fonction Python native de même
+# nom (`min`/`max`/`round`/`abs`) — codegen/api_fastapi.py les émet telles
+# quelles, sans dispatch supplémentaire.
+VALIDATION_FUNCTIONS = {
+    "min": "min", "minimum": "min", "mindestens": "min",
+    "max": "max", "maximum": "max", "hoechstens": "max", "höchstens": "max",
+    "round": "round", "arrondi": "round", "arrondir": "round",
+    "redondear": "round", "runden": "round",
+    "arrotonda": "round", "arrotondare": "round", "arredondar": "round",
+    "abs": "abs", "valeur_absolue": "abs", "valor_absoluto": "abs",
+    "betrag": "abs", "valore_assoluto": "abs",
 }
 
 
